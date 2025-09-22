@@ -176,12 +176,20 @@ const PROMPT = {
   repair_deadline:   "К какому сроку нужен ремонт? (например: завтра/1–2 дня/дата) 🗓️",
   self_delivery:     "Для ускорения обработки вашей заявки вы можете самостоятельно доставить технику по адресу: г. Дубна, проспект Боголюбова, 15, офис 39.\nЕсть ли возможность доставить самостоятельно? ⤵️"
 };
+  // Сопоставление кнопок (с эмодзи) и «чистых» значений
+const SERVICE_OPTIONS = [
+  { btn: "🛒 Заказ картриджей",     key: "Заказ картриджей" },
+  { btn: "🛠 Ремонт оргтехники",     key: "Ремонт оргтехники" },
+  { btn: "🔄 Заправка картриджей",   key: "Заправка картриджей" },
+  { btn: "🧑‍🔧 Вызвать мастера в офис", key: "Вызвать мастера в офис" }
+];
+
 
 const START_KBD = { keyboard: [[{ text: "▶️ Старт" }, { text: "❌ Отмена" }]], resize_keyboard: true };
 const SERVICE_KBD = {
   keyboard: [
-    [{ text: "Заказ картриджей" }, { text: "Ремонт оргтехники" }],
-    [{ text: "Заправка картриджей" }, { text: "Вызвать мастера в офис" }]
+    [{ text: SERVICE_OPTIONS[0].btn }, { text: SERVICE_OPTIONS[1].btn }],
+    [{ text: SERVICE_OPTIONS[2].btn }, { text: SERVICE_OPTIONS[3].btn }]
   ],
   resize_keyboard: true,
   one_time_keyboard: true
@@ -201,29 +209,34 @@ const EDIT_INLINE  = {
     [{text:"⬅️ Назад", callback_data:"BACK"}]
   ]
 };
-
 function makeSummary(state, idx) {
-  return `Проверьте заявку:
+  const lines = [];
+  lines.push("Проверьте заявку:\n");
 
-👤 Имя: ${state[idx.name]||""}
-📱 Тел: ${state[idx.phone]||""}
-🏢 Компания: ${state[idx.company]||""}
+  const add = (label, value) => {
+    const v = (value || "").toString().trim();
+    if (v) lines.push(`${label} ${v}`);
+  };
 
-🧭 Услуга: ${state[idx.service_type]||""}
-🧾 Модель: ${state[idx.model]||""}
-🛠 Проблема: ${state[idx.issue]||""}
-🔢 Кол-во (картриджи): ${state[idx.qty]||""}
-🖨 Кол-во техники: ${state[idx.devices_count]||""}
-🚚 Срок доставки: ${state[idx.delivery_deadline]||""}
-🗓️ Срок ремонта: ${state[idx.repair_deadline]||""}
-📦 Самодоставка: ${state[idx.self_delivery]||""}
+  add("👤 Имя:", state[idx.name]);
+  add("📱 Тел:", state[idx.phone]);
+  add("🏢 Компания:", state[idx.company]);
 
-🎧 Голос: ${state[idx.voice_urls] ? state[idx.voice_urls] : "—"}
-🗒 Текст голоса: ${state[idx.voice_texts] ? state[idx.voice_texts] : "—"}
+  add("🧭 Услуга:", state[idx.service_type]);
+  add("🧾 Модель:", state[idx.model]);
+  add("🛠 Проблема:", state[idx.issue]);
+  add("🔢 Кол-во (картриджи):", state[idx.qty]);
+  add("🖨 Кол-во техники:", state[idx.devices_count]);
+  add("🚚 Срок доставки:", state[idx.delivery_deadline]);
+  add("🗓️ Срок ремонта:", state[idx.repair_deadline]);
+  add("📦 Самодоставка:", state[idx.self_delivery]);
 
-Всё верно?`;
+  add("🎧 Голос:", state[idx.voice_urls]);
+  add("🗒 Текст голоса:", state[idx.voice_texts]);
+
+  lines.push("\nВсё верно?");
+  return lines.join("\n");
 }
-
 // ==== Dialog state
 async function findStateRow(sheets, chatId) {
   const rows = await readAll(sheets, "DialogState!A:Z");
@@ -294,29 +307,40 @@ export default async function handler(req, res) {
         ]);
 
         if (WORK_CHAT_ID) {
-          await tgSend(
-            WORK_CHAT_ID,
-`Новая заявка
-👤 ${row[idx.name]||""}
-📱 ${row[idx.phone]||""}
-🏢 ${row[idx.company]||""}
-🧭 ${row[idx.service_type]||""}
-🧾 ${row[idx.model]||""}
-🛠 ${row[idx.issue]||""}
-🔢 ${row[idx.qty]||""}
-🖨 ${row[idx.devices_count]||""}
-🚚 ${row[idx.delivery_deadline]||""}
-🗓️ ${row[idx.repair_deadline]||""}
-📦 ${row[idx.self_delivery]||""}${vline}${tline}`
-          );
+          const card = [];
+          const add = (label, value) => {
+            const v = (value || "").toString().trim();
+            if (v) card.push(`${label} ${v}`);
+          };
+          card.push("Новая заявка");
+          add("👤", row[idx.name]);
+          add("📱", row[idx.phone]);
+          add("🏢", row[idx.company]);
+          add("🧭", row[idx.service_type]);
+          add("🧾", row[idx.model]);
+          add("🛠", row[idx.issue]);
+          add("🔢", row[idx.qty]);
+          add("🖨", row[idx.devices_count]);
+          add("🚚", row[idx.delivery_deadline]);
+          add("🗓️", row[idx.repair_deadline]);
+          add("📦", row[idx.self_delivery]);
+          // Голос/транскрипт — тоже только если есть
+          if ((row[idx.voice_urls] || "").toString().trim()) {
+            card.push(`🎧 ${row[idx.voice_urls]}`);
+          }
+          if ((row[idx.voice_texts] || "").toString().trim()) {
+            card.push(`🗒 ${row[idx.voice_texts]}`);
+          }
+          await tgSend(WORK_CHAT_ID, card.join("\n"));
         }
+
         await setField(sheets, st.rowNum, head, "step", "done");
         await tgSend(chatId, "Спасибо! Заявка принята. Менеджер свяжется с вами в ближайшее время. 🙌");
         res.status(200).send("ok"); return;
       }
 
       if (cbData === "EDIT_MENU") {
-        await tgSend(chatId, "Что исправим?", EDIT_INLINE);
+        await tgSend(chatId, "🧭 Услуга?", EDIT_INLINE);
         res.status(200).send("ok"); return;
       }
 
@@ -463,11 +487,18 @@ export default async function handler(req, res) {
     }
     if (step === "ask_service") {
       const v = (text || "").trim();
-      const options = ["Заказ картриджей","Ремонт оргтехники","Заправка картриджей","Вызвать мастера в офис"];
-      if (!options.includes(v)) { await tgSend(chatId, "Выберите вариант на клавиатуре.", SERVICE_KBD); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "service_type", v);
-      if (v === "Вызвать мастера в офис") { await ask("issue"); }
-      else { await ask("model"); }
+      // ищем по включению «чистого» ключа — эмодзи не помеха
+      const opt = SERVICE_OPTIONS.find(o => v.includes(o.key));
+      if (!opt) {
+        await tgSend(chatId, "Выберите вариант на клавиатуре.", SERVICE_KBD);
+        res.status(200).send("ok"); return;
+      }
+      await setField(sheets, st.rowNum, head, "service_type", opt.key);
+      if (opt.key === "Вызвать мастера в офис") {
+        await ask("issue");
+      } else {
+        await ask("model");
+      }
       res.status(200).send("ok"); return;
     }
     if (step === "ask_model") {
