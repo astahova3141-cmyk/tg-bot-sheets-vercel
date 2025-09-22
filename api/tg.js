@@ -43,7 +43,7 @@ async function tgAction(chat_id, action = "typing") {
   });
 }
 
-// Ссылка от Telegram (если нужна)
+// === Files / voice
 async function tgFileLink(fileId) {
   if (!BOT_TOKEN || !fileId) return null;
   const r = await fetch(`${TGBOT}/getFile?file_id=${encodeURIComponent(fileId)}`);
@@ -52,23 +52,17 @@ async function tgFileLink(fileId) {
   return path ? `https://api.telegram.org/file/bot${BOT_TOKEN}/${path}` : null;
 }
 
-// Скачиваем бинарь у Telegram и шлём байты в Deepgram (надёжнее URL-режима)
 async function transcribeVoiceFromTelegram(fileId, mime = "audio/ogg", lang = "ru") {
   if (!DEEPGRAM_API_KEY || !fileId) return null;
-
-  // 1) получаем file_path
   const r1 = await fetch(`${TGBOT}/getFile?file_id=${encodeURIComponent(fileId)}`);
   const j1 = await r1.json();
   const path = j1?.result?.file_path;
   if (!path) return null;
-
-  // 2) качаем байты из Telegram
   const tgFileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${path}`;
   const r2 = await fetch(tgFileUrl);
   if (!r2.ok) return null;
   const buf = await r2.arrayBuffer();
 
-  // 3) шлём байты в Deepgram
   const url = `https://api.deepgram.com/v1/listen?language=${encodeURIComponent(lang)}&smart_format=true&punctuate=true`;
   const resp = await fetch(url, {
     method: "POST",
@@ -97,24 +91,21 @@ async function getSheets() {
 
 async function ensureHeaders(sheets) {
   const need = {
-  DialogState: [
-    "chat_id","step","name","phone","company",
-    // новое
-    "service_type",                 // что нужно сделать (4 варианта)
-    "model","issue","qty","devices_count",
-    "delivery_deadline","repair_deadline","self_delivery",
-    // голос — как было
-    "voice_urls","voice_texts",
-    "updated_at"
-  ],
-  Requests: [
-    "date","name","phone","company",
-    "service_type","model","issue","qty","devices_count",
-    "delivery_deadline","repair_deadline","self_delivery",
-    "voice_urls","voice_texts",
-    "chat_id","ticket_id","status","yougile_link","notified","closed_at"
-  ]
-};
+    DialogState: [
+      "chat_id","step","name","phone","company",
+      "service_type","model","issue","qty","devices_count",
+      "delivery_deadline","repair_deadline","self_delivery",
+      "voice_urls","voice_texts",
+      "updated_at"
+    ],
+    Requests: [
+      "date","name","phone","company",
+      "service_type","model","issue","qty","devices_count",
+      "delivery_deadline","repair_deadline","self_delivery",
+      "voice_urls","voice_texts",
+      "chat_id","ticket_id","status","yougile_link","notified","closed_at"
+    ]
+  };
 
   const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
   const titles = (meta.data.sheets || []).map(s => s.properties.title);
@@ -167,9 +158,7 @@ async function updateCell(sheets, sheet, row, colLetter, value) {
   });
 }
 
-function colLetterFromIndex(idx) { // 0-based
-  return String.fromCharCode(65 + idx);
-}
+function colLetterFromIndex(idx) { return String.fromCharCode(65 + idx); }
 
 // ==== UI
 const PROMPT = {
@@ -177,7 +166,6 @@ const PROMPT = {
   phone:   "Укажите телефон (формат +7XXXXXXXXXX или 8XXXXXXXXXX) 📱",
   company: "Как называется компания? 🏢",
 
-  // новое:
   service: "Что необходимо сделать? Выберите ниже ⤵️",
   model:   "Укажите модель устройства / картриджа (например: HP LaserJet Pro M404 / CF259A) 🧾",
   issue:   "Кратко опишите проблему (1–2 предложения) 🛠️",
@@ -188,14 +176,31 @@ const PROMPT = {
   repair_deadline:   "К какому сроку нужен ремонт? (например: завтра/1–2 дня/дата) 🗓️",
   self_delivery:     "Для ускорения обработки вашей заявки вы можете самостоятельно доставить технику по адресу: г. Дубна, проспект Боголюбова, 15, офис 39.\nЕсть ли возможность доставить самостоятельно? ⤵️"
 };
-const START_KBD = {keyboard: [[{ text: "▶️ Старт" }, { text: "❌ Отмена" }]],resize_keyboard: true};
-const SERVICE_KBD = {keyboard: [[{ text: "Заказ картриджей" }, { text: "Ремонт оргтехники" }],[{ text: "Заправка картриджей" }, { text: "Вызвать мастера в офис" }]], resize_keyboard: true,one_time_keyboard: true};
+
+const START_KBD = { keyboard: [[{ text: "▶️ Старт" }, { text: "❌ Отмена" }]], resize_keyboard: true };
+const SERVICE_KBD = {
+  keyboard: [
+    [{ text: "Заказ картриджей" }, { text: "Ремонт оргтехники" }],
+    [{ text: "Заправка картриджей" }, { text: "Вызвать мастера в офис" }]
+  ],
+  resize_keyboard: true,
+  one_time_keyboard: true
+};
+const YESNO_KBD = { keyboard: [[{ text: "Да" }, { text: "Нет" }]], resize_keyboard: true, one_time_keyboard: true };
 const KBD_MAIN   = { keyboard: [[{ text: "❌ Отмена /stop" }]], resize_keyboard: true };
-const KBD_DEVICE = { keyboard: [[{text:"🖨 Принтер"},{text:"🖨 МФУ"},{text:"📠 Копир"}],[{text:"🧰 Другое"}]], resize_keyboard:true, one_time_keyboard:true };
-const YESNO_KBD = {keyboard: [[{ text: "Да" }, { text: "Нет" }]],resize_keyboard: true,one_time_keyboard: true};
-const KBD_URGENT = { keyboard: [[{text:"⏱ В течение дня"},{text:"📅 Завтра"}],[{text:"🕑 1–2 дня"}]], resize_keyboard:true, one_time_keyboard:true };
+
 const YESNO_INLINE = { inline_keyboard: [[{text:"✅ Подтвердить", callback_data:"CONFIRM"}],[{text:"✏️ Исправить…", callback_data:"EDIT_MENU"}]] };
-const EDIT_INLINE  = { inline_keyboard: [[{text:"👤 Имя", callback_data:"EDIT:name"},{text:"📱 Телефон", callback_data:"EDIT:phone"}],[{text:"🏢 Компания", callback_data:"EDIT:company"},{text:"🖨 Устройство", callback_data:"EDIT:device"}],[{text:"🧾 Модель", callback_data:"EDIT:model"},{text:"🛠 Проблема", callback_data:"EDIT:issue"}],[{text:"⏳ Срочность", callback_data:"EDIT:urgent"}],[{text:"⬅️ Назад", callback_data:"BACK"}]] };
+const EDIT_INLINE  = {
+  inline_keyboard: [
+    [{text:"👤 Имя", callback_data:"EDIT:name"}, {text:"📱 Телефон", callback_data:"EDIT:phone"}],
+    [{text:"🏢 Компания", callback_data:"EDIT:company"}, {text:"🧭 Услуга", callback_data:"EDIT:service"}],
+    [{text:"🧾 Модель", callback_data:"EDIT:model"}, {text:"🛠 Проблема", callback_data:"EDIT:issue"}],
+    [{text:"🔢 Кол-во", callback_data:"EDIT:qty"}, {text:"🖨 Техники", callback_data:"EDIT:devices_count"}],
+    [{text:"🚚 Срок дост.", callback_data:"EDIT:delivery_deadline"}, {text:"🗓️ Срок ремонта", callback_data:"EDIT:repair_deadline"}],
+    [{text:"📦 Самодоставка", callback_data:"EDIT:self_delivery"}],
+    [{text:"⬅️ Назад", callback_data:"BACK"}]
+  ]
+};
 
 function makeSummary(state, idx) {
   return `Проверьте заявку:
@@ -218,6 +223,7 @@ function makeSummary(state, idx) {
 
 Всё верно?`;
 }
+
 // ==== Dialog state
 async function findStateRow(sheets, chatId) {
   const rows = await readAll(sheets, "DialogState!A:Z");
@@ -228,10 +234,18 @@ async function findStateRow(sheets, chatId) {
       return { rowNum: r+1, data: rows[r], idx, head };
     }
   }
-  await appendRow(sheets, "DialogState", [String(chatId),"ask_name","","","","","","","","","", new Date().toISOString()]);
+  // ВСТАВЛЯЕМ СТРОКУ ПОЛНОЙ ДЛИНЫ (16 колонок)
+  await appendRow(sheets, "DialogState", [
+    String(chatId), "ask_name", "", "", "",          // chat_id, step, name, phone, company
+    "", "", "", "", "",                              // service_type, model, issue, qty, devices_count
+    "", "", "",                                      // delivery_deadline, repair_deadline, self_delivery
+    "", "",                                          // voice_urls, voice_texts
+    new Date().toISOString()                         // updated_at
+  ]);
   const fresh = await readAll(sheets, "DialogState!A:Z");
   return { rowNum: fresh.length, data: fresh[fresh.length-1], idx, head };
 }
+
 async function setField(sheets, rowNum, head, field, value) {
   const colIdx = head.indexOf(field); if (colIdx<0) return;
   const colLetter = colLetterFromIndex(colIdx);
@@ -245,11 +259,7 @@ async function setField(sheets, rowNum, head, field, value) {
 
 // ==== Handler
 export default async function handler(req, res) {
-  // быстрый ответ на не-POST
-  if (req.method !== "POST") { 
-    res.status(200).send("ok"); 
-    return; 
-  }
+  if (req.method !== "POST") { res.status(200).send("ok"); return; }
 
   try {
     const sheets = await getSheets();
@@ -259,7 +269,6 @@ export default async function handler(req, res) {
     const cb  = update.callback_query || null;
     const msg = update.message || {};
 
-    // объявляем ОДИН раз
     const chatId = cb ? cb.message?.chat?.id : msg.chat?.id;
     const text   = (msg.text || "").trim();
     const cbData = cb ? String(cb.data || "") : null;
@@ -274,36 +283,41 @@ export default async function handler(req, res) {
         const vline = row[idx.voice_urls]  ? `\n🎧 Голос(а): ${row[idx.voice_urls]}`   : "";
         const tline = row[idx.voice_texts] ? `\n🗒 Текст(ы): ${row[idx.voice_texts]}` : "";
 
-       await appendRow(sheets, "Requests", [
-         new Date().toISOString(),
-         row[idx.name]||"", row[idx.phone]||"", row[idx.company]||"",
-         row[idx.service_type]||"", row[idx.model]||"", row[idx.issue]||"",
-         row[idx.qty]||"", row[idx.devices_count]||"",
-         row[idx.delivery_deadline]||"", row[idx.repair_deadline]||"", row[idx.self_delivery]||"",
-         row[idx.voice_urls]||"", row[idx.voice_texts]||"",
-         String(chatId), "", "new", "", "no", ""
-       ]);
-
+        await appendRow(sheets, "Requests", [
+          new Date().toISOString(),
+          row[idx.name]||"", row[idx.phone]||"", row[idx.company]||"",
+          row[idx.service_type]||"", row[idx.model]||"", row[idx.issue]||"",
+          row[idx.qty]||"", row[idx.devices_count]||"",
+          row[idx.delivery_deadline]||"", row[idx.repair_deadline]||"", row[idx.self_delivery]||"",
+          row[idx.voice_urls]||"", row[idx.voice_texts]||"",
+          String(chatId), "", "new", "", "no", ""
+        ]);
 
         if (WORK_CHAT_ID) {
-          await tgSend(WORK_CHAT_ID,
+          await tgSend(
+            WORK_CHAT_ID,
 `Новая заявка
 👤 ${row[idx.name]||""}
 📱 ${row[idx.phone]||""}
 🏢 ${row[idx.company]||""}
-🖨 ${row[idx.device]||""}
+🧭 ${row[idx.service_type]||""}
 🧾 ${row[idx.model]||""}
 🛠 ${row[idx.issue]||""}
-⏳ ${row[idx.urgent]||""}${vline}${tline}`);
+🔢 ${row[idx.qty]||""}
+🖨 ${row[idx.devices_count]||""}
+🚚 ${row[idx.delivery_deadline]||""}
+🗓️ ${row[idx.repair_deadline]||""}
+📦 ${row[idx.self_delivery]||""}${vline}${tline}`
+          );
         }
         await setField(sheets, st.rowNum, head, "step", "done");
         await tgSend(chatId, "Спасибо! Заявка принята. Менеджер свяжется с вами в ближайшее время. 🙌");
         res.status(200).send("ok"); return;
       }
 
-      if (cbData === "EDIT_MENU") { 
-        await tgSend(chatId, "Что исправим?", EDIT_INLINE); 
-        res.status(200).send("ok"); return; 
+      if (cbData === "EDIT_MENU") {
+        await tgSend(chatId, "Что исправим?", EDIT_INLINE);
+        res.status(200).send("ok"); return;
       }
 
       if (cbData === "BACK") {
@@ -314,9 +328,12 @@ export default async function handler(req, res) {
       }
 
       if (cbData && cbData.startsWith("EDIT:")) {
-        const field = cbData.split(":")[1];
-        await setField(sheets, st.rowNum, head, "step", "edit_"+field); // режим правки
-        const kbd = field==="device" ? KBD_DEVICE : (field==="urgent" ? KBD_URGENT : KBD_MAIN);
+        const field = cbData.split(":")[1]; // name/phone/company/service/model/...
+        await setField(sheets, st.rowNum, head, "step", "edit_"+field);
+        // правильная клавиатура для конкретного поля
+        let kbd = KBD_MAIN;
+        if (field === "service") kbd = SERVICE_KBD;
+        if (field === "self_delivery") kbd = YESNO_KBD;
         await tgSend(chatId, PROMPT[field] || "Введите значение:", kbd);
         res.status(200).send("ok"); return;
       }
@@ -324,72 +341,48 @@ export default async function handler(req, res) {
       res.status(200).send("ok"); return;
     }
 
-    // === VOICE (если есть) ===
+    // === VOICE ===
     if (msg.voice && msg.voice.file_id) {
       await tgAction(chatId, "record_voice");
-
       const fileId = msg.voice.file_id;
       const mime   = msg.voice.mime_type || "audio/ogg";
-
       const st0 = await findStateRow(sheets, chatId);
       const head0 = st0.head, idx0 = st0.idx;
 
-      // 1) ссылка (на всякий случай тоже сохраним)
       const link = await tgFileLink(fileId);
-
-      // 2) распознаём байтами (надёжно)
       let transcript = null;
-      try {
-        transcript = await transcribeVoiceFromTelegram(fileId, mime, "ru");
-      } catch (_) {}
+      try { transcript = await transcribeVoiceFromTelegram(fileId, mime, "ru"); } catch (_) {}
 
-      // 3) аппендим к уже существующим значениям
       const prevUrls  = (st0.data[idx0.voice_urls]  || "").trim();
       const prevTexts = (st0.data[idx0.voice_texts] || "").trim();
-
       const newUrls  = link ? (prevUrls ? prevUrls + "\n" + link : link) : prevUrls;
       const newTexts = transcript ? (prevTexts ? prevTexts + "\n" + transcript : transcript) : prevTexts;
 
       if (newUrls !== prevUrls)   await setField(sheets, st0.rowNum, head0, "voice_urls", newUrls);
       if (newTexts !== prevTexts) await setField(sheets, st0.rowNum, head0, "voice_texts", newTexts);
 
-      if (transcript) {
-        await tgSend(chatId, "🎙 Голосовое прикрепил к заявке.\n🗒 Текст распознан и сохранён.");
-      } else {
-        await tgSend(chatId, "🎙 Голосовое прикрепил к заявке. Распознать не удалось, но ссылка сохранена.");
-      }
-      // продолжаем сценарий
+      await tgSend(chatId, transcript
+        ? "🎙 Голосовое прикрепил к заявке.\n🗒 Текст распознан и сохранён."
+        : "🎙 Голосовое прикрепил к заявке. Распознать не удалось, но ссылка сохранена."
+      );
     }
 
-    // === КОМАНДЫ ===
-    if (text === "/ping") { 
-      await tgSend(chatId, "ALIVE ✅"); 
-      res.status(200).send("ok"); 
-      return; 
-    }
-    if (text === "/help") { 
-      await tgSend(chatId, "Команды:\n/start — начать заново\n/stop — отменить\n/id — ваш Chat ID\n/help — помощь"); 
-      res.status(200).send("ok"); 
-      return; 
-    }
-    if (text === "/id")   { 
-      await tgSend(chatId, "Chat ID: " + chatId); 
-      res.status(200).send("ok"); 
-      return; 
-    }
-    if (text === "/stop") {
+    // === Команды ===
+    if (text === "/ping") { await tgSend(chatId, "ALIVE ✅"); res.status(200).send("ok"); return; }
+    if (text === "/help") { await tgSend(chatId, "Команды:\n/start — начать заново\n/stop — отменить\n/id — ваш Chat ID\n/help — помощь"); res.status(200).send("ok"); return; }
+    if (text === "/id")   { await tgSend(chatId, "Chat ID: " + chatId); res.status(200).send("ok"); return; }
+
+    if (text === "/stop" || text === "❌ Отмена") {
       const st = await findStateRow(sheets, chatId);
       await setField(sheets, st.rowNum, st.head, "step", "stopped");
-      await tgSend(chatId, "Ок, остановил. Чтобы начать заново — /start");
+      await tgSend(chatId, "Ок, остановил. Чтобы начать заново — /start", START_KBD);
       res.status(200).send("ok"); return;
     }
+
     if (text === "/start") {
       const st = await findStateRow(sheets, chatId);
-      // очистим все поля нового сценария
-      for (const f of [
-        "name","phone","company","service_type","model","issue",
-        "qty","devices_count","delivery_deadline","repair_deadline","self_delivery","voice_urls","voice_texts"
-      ]) {
+      // очистка всех полей сценария
+      for (const f of ["name","phone","company","service_type","model","issue","qty","devices_count","delivery_deadline","repair_deadline","self_delivery","voice_urls","voice_texts"]) {
         await setField(sheets, st.rowNum, st.head, f, "");
       }
       await setField(sheets, st.rowNum, st.head, "step", "wait_start");
@@ -398,13 +391,7 @@ export default async function handler(req, res) {
       else await tgSend(chatId, about, START_KBD);
       res.status(200).send("ok"); return;
     }
-    // старт / отмена
-    if (text === "❌ Отмена") {
-      const st = await findStateRow(sheets, chatId);
-      await setField(sheets, st.rowNum, st.head, "step", "stopped");
-      await tgSend(chatId, "Ок, остановил. Чтобы начать заново — /start", START_KBD);
-      res.status(200).send("ok"); return;
-    }
+
     if (text === "▶️ Старт") {
       const st = await findStateRow(sheets, chatId);
       await setField(sheets, st.rowNum, st.head, "step", "ask_name");
@@ -412,34 +399,43 @@ export default async function handler(req, res) {
       res.status(200).send("ok"); return;
     }
 
-
-    // === ДИАЛОГ ===
+    // === Диалог ===
     const st = await findStateRow(sheets, chatId);
     const head = st.head, idx = st.idx;
     const step = st.data[idx["step"]] || "ask_name";
 
-    // ---- РЕЖИМ ПРАВКИ (одного поля) ----
+    // Режим правки одного поля
     if (String(step).startsWith("edit_")) {
-      const field = String(step).slice(5); // edit_name -> name
-      const val = (text || "").trim();
-      if (!val) { await tgSend(chatId, "Введите значение."); res.status(200).send("ok"); return; }
+      const field = String(step).slice(5); // edit_name -> name / service / ...
+      const rawVal = (text || "").trim();
+      if (!rawVal) { await tgSend(chatId, "Введите значение."); res.status(200).send("ok"); return; }
+
+      let targetField = field;
+      let val = rawVal;
 
       if (field === "phone") {
         const s = val.replace(/\D+/g, "");
         const norm = (s.length===11 && (s[0]==="7"||s[0]==="8")) ? "+7"+s.slice(1) : (s.length===10 ? "+7"+s : null);
         if (!norm) { await tgSend(chatId, "Телефон не распознан. Формат: +7XXXXXXXXXX или 8XXXXXXXXXX."); res.status(200).send("ok"); return; }
-        await setField(sheets, st.rowNum, head, "phone", norm);
-      } else {
-        await setField(sheets, st.rowNum, head, field, val);
+        val = norm;
+      }
+      if (field === "service") { targetField = "service_type"; }
+      if (field === "self_delivery") {
+        const v = val.toLowerCase(); val = v.includes("да") ? "Да" : v.includes("нет") ? "Нет" : val;
+      }
+      if (field === "qty" || field === "devices_count") {
+        const n = parseInt(val, 10); if (!(n>0)) { await tgSend(chatId, "Введите положительное число."); res.status(200).send("ok"); return; }
+        val = String(n);
       }
 
+      await setField(sheets, st.rowNum, head, targetField, val);
       await setField(sheets, st.rowNum, head, "step", "confirm");
       const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
       await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
       res.status(200).send("ok"); return;
     }
 
-    // ---- ОБЫЧНЫЕ ШАГИ ask_*
+    // Хелпер вопроса
     async function ask(field) {
       let kbd = KBD_MAIN;
       if (field === "service") kbd = SERVICE_KBD;
@@ -448,6 +444,8 @@ export default async function handler(req, res) {
       await tgSend(chatId, PROMPT[field], kbd);
       await setField(sheets, st.rowNum, head, "step", "ask_"+field);
     }
+
+    // Шаги
     if (step === "ask_name") {
       if (!text) { await tgSend(chatId, "Введите имя."); res.status(200).send("ok"); return; }
       await setField(sheets, st.rowNum, head, "name", text); await ask("phone"); res.status(200).send("ok"); return;
@@ -460,45 +458,26 @@ export default async function handler(req, res) {
     }
     if (step === "ask_company") {
       if (!text) { await tgSend(chatId, "Укажите название компании."); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "company", text); await ask("device"); res.status(200).send("ok"); return;
+      await setField(sheets, st.rowNum, head, "company", text);
+      await ask("service"); res.status(200).send("ok"); return; // ← исправлено: к выбору услуги
     }
     if (step === "ask_service") {
       const v = (text || "").trim();
       const options = ["Заказ картриджей","Ремонт оргтехники","Заправка картриджей","Вызвать мастера в офис"];
-      if (!options.includes(v)) {
-        await tgSend(chatId, "Выберите вариант на клавиатуре.", SERVICE_KBD);
-        res.status(200).send("ok"); return;
-      }
+      if (!options.includes(v)) { await tgSend(chatId, "Выберите вариант на клавиатуре.", SERVICE_KBD); res.status(200).send("ok"); return; }
       await setField(sheets, st.rowNum, head, "service_type", v);
-      if (v === "Заказ картриджей") {
-        await ask("model");
-      } else if (v === "Ремонт оргтехники") {
-        await ask("model");
-      } else if (v === "Заправка картриджей") {
-        await ask("model");
-      } else if (v === "Вызвать мастера в офис") {
-        await ask("issue");
-      }
+      if (v === "Вызвать мастера в офис") { await ask("issue"); }
+      else { await ask("model"); }
       res.status(200).send("ok"); return;
-    }
-    if (step === "ask_device") {
-      if (!text) { await tgSend(chatId, "Выберите устройство на клавиатуре или введите текстом."); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "device", text); await ask("model"); res.status(200).send("ok"); return;
     }
     if (step === "ask_model") {
       if (!text) { await tgSend(chatId, "Укажите модель устройства/картриджа."); res.status(200).send("ok"); return; }
       await setField(sheets, st.rowNum, head, "model", text);
-      const service = st.data[ idx["service_type"] ];
-      if (service === "Заказ картриджей") {
-        await ask("qty");
-      } else if (service === "Ремонт оргтехники") {
-        await ask("issue");
-      } else if (service === "Заправка картриджей") {
-        await ask("qty");
-      } else {
-        // на мастера сюда обычно не попадаем
-        await ask("issue");
-      }
+      const service = st.data[idx["service_type"]];
+      if (service === "Заказ картриджей")       await ask("qty");
+      else if (service === "Заправка картриджей") await ask("qty");
+      else if (service === "Ремонт оргтехники")   await ask("issue");
+      else                                         await ask("issue");
       res.status(200).send("ok"); return;
     }
     if (step === "ask_qty") {
@@ -506,13 +485,9 @@ export default async function handler(req, res) {
       if (!(n > 0)) { await tgSend(chatId, "Введите положительное число."); res.status(200).send("ok"); return; }
       await setField(sheets, st.rowNum, head, "qty", String(n));
       const service = st.data[idx["service_type"]];
-      if (service === "Заказ картриджей") {
-        await ask("delivery_deadline");
-      } else if (service === "Заправка картриджей") {
-        await ask("self_delivery"); // вопрос про самодоставку перед подтверждением
-      } else {
-        await ask("issue"); // fallback
-      }
+      if (service === "Заказ картриджей")      await ask("delivery_deadline");
+      else if (service === "Заправка картриджей") await ask("self_delivery");
+      else                                      await ask("issue");
       res.status(200).send("ok"); return;
     }
     if (step === "ask_issue") {
@@ -522,12 +497,9 @@ export default async function handler(req, res) {
       if (service === "Ремонт оргтехники") {
         await ask("devices_count");
       } else if (service === "Вызвать мастера в офис") {
-        // сразу к подтверждению
         await setField(sheets, st.rowNum, head, "step", "confirm");
         const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
         await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
-      } else {
-        // прочие ветки уже обработаны
       }
       res.status(200).send("ok"); return;
     }
@@ -538,17 +510,15 @@ export default async function handler(req, res) {
       await ask("repair_deadline");
       res.status(200).send("ok"); return;
     }
-     if (step === "ask_delivery_deadline") {
-       await setField(sheets, st.rowNum, head, "delivery_deadline", (text||"").trim());
-       // заказ картриджей → сразу подтверждение
-       await setField(sheets, st.rowNum, head, "step", "confirm");
-       const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
-       await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
-       res.status(200).send("ok"); return;
-     }
+    if (step === "ask_delivery_deadline") {
+      await setField(sheets, st.rowNum, head, "delivery_deadline", (text||"").trim());
+      await setField(sheets, st.rowNum, head, "step", "confirm");
+      const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
+      await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
+      res.status(200).send("ok"); return;
+    }
     if (step === "ask_repair_deadline") {
       await setField(sheets, st.rowNum, head, "repair_deadline", (text||"").trim());
-      // ремонт → спросим про самодоставку
       await ask("self_delivery");
       res.status(200).send("ok"); return;
     }
@@ -563,17 +533,6 @@ export default async function handler(req, res) {
       res.status(200).send("ok"); return;
     }
 
-    if (step === "ask_urgent") {
-      const v = (text || "").toLowerCase();
-      const ok = ["в течение дня","завтра","1–2 дня","1-2 дня"].some(k => v.includes(k));
-      if (!ok) { await tgSend(chatId, "Выберите с клавиатуры: «В течение дня», «Завтра» или «1–2 дня»."); res.status(200).send("ok"); return; }
-      const val = v.includes("в течение") ? "в течение дня" : (v.includes("завтра") ? "завтра" : "1–2 дня");
-      await setField(sheets, st.rowNum, head, "urgent", val);
-      const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
-      await setField(sheets, st.rowNum, head, "step", "confirm");
-      await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
-      res.status(200).send("ok"); return;
-    }
     if (step === "confirm") {
       await tgSend(chatId, "Нажмите «✅ Подтвердить» или «✏️ Исправить…» ниже.");
       res.status(200).send("ok"); return;
@@ -581,14 +540,11 @@ export default async function handler(req, res) {
 
     // дефолт
     await tgSend(chatId, "Давайте начнём заново: /start");
-    res.status(200).send("ok"); 
-    return;
+    res.status(200).send("ok"); return;
 
   } catch (e) {
     console.error(e);
-    // Даже в случае ошибки отвечаем 200, чтобы Telegram не спамил ретраями
-    res.status(200).send("ok");
-    return;
+    res.status(200).send("ok"); return;
   }
 }
 
