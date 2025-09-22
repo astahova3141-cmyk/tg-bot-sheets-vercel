@@ -202,7 +202,7 @@ export default async function handler(req, res){
       if (data === "EDIT_MENU"){ await tgSend(chatId, "Что исправим?", EDIT_INLINE); return; }
       if (data === "BACK"){
         await setField(sheets, st.rowNum, head, "step", "confirm");
-        const fresh = (await readAll(sheets, f"DialogState!A{st.rowNum}:Z{st.rowNum}"))[0];
+        const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
         await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
         return;
       }
@@ -291,7 +291,7 @@ export default async function handler(req, res){
         if (!ok){ await tgSend(chatId,"Выберите с клавиатуры: «В течение дня», «Завтра» или «1–2 дня»."); return; }
         const val = v.includes("в течение") ? "в течение дня" : (v.includes("завтра") ? "завтра" : "1–2 дня");
         await setField(sheets, st.rowNum, head, "urgent", val);
-        const fresh = (await readAll(sheets, f"DialogState!A{st.rowNum}:Z{st.rowNum}"))[0];
+        const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
         await setField(sheets, st.rowNum, head, "step", "confirm");
         await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
         return;
