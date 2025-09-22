@@ -43,6 +43,7 @@ async function tgAction(chat_id, action = "typing") {
   });
 }
 
+// Ссылка от Telegram (если нужна)
 async function tgFileLink(fileId) {
   if (!BOT_TOKEN || !fileId) return null;
   const r = await fetch(`${TGBOT}/getFile?file_id=${encodeURIComponent(fileId)}`);
@@ -51,22 +52,35 @@ async function tgFileLink(fileId) {
   return path ? `https://api.telegram.org/file/bot${BOT_TOKEN}/${path}` : null;
 }
 
-// ==== Deepgram (ASR) — распознаём по URL
-async function transcribeByDeepgram(fileUrl, lang = "ru") {
-  if (!DEEPGRAM_API_KEY || !fileUrl) return null;
-  // модель можно сменить при желании; ru поддерживается
+// Скачиваем бинарь у Telegram и шлём байты в Deepgram (надёжнее URL-режима)
+async function transcribeVoiceFromTelegram(fileId, mime = "audio/ogg", lang = "ru") {
+  if (!DEEPGRAM_API_KEY || !fileId) return null;
+
+  // 1) получаем file_path
+  const r1 = await fetch(`${TGBOT}/getFile?file_id=${encodeURIComponent(fileId)}`);
+  const j1 = await r1.json();
+  const path = j1?.result?.file_path;
+  if (!path) return null;
+
+  // 2) качаем байты из Telegram
+  const tgFileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${path}`;
+  const r2 = await fetch(tgFileUrl);
+  if (!r2.ok) return null;
+  const buf = await r2.arrayBuffer();
+
+  // 3) шлём байты в Deepgram
   const url = `https://api.deepgram.com/v1/listen?language=${encodeURIComponent(lang)}&smart_format=true&punctuate=true`;
   const resp = await fetch(url, {
     method: "POST",
     headers: {
       "Authorization": `Token ${DEEPGRAM_API_KEY}`,
-      "Content-Type": "application/json"
+      "Content-Type": mime || "application/octet-stream"
     },
-    body: JSON.stringify({ url: fileUrl })
+    body: Buffer.from(buf) // Node 18 поддерживает Buffer в fetch
   });
+
   if (!resp.ok) return null;
   const data = await resp.json().catch(()=>null);
-  // типичный путь к транскрипту
   const text = data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
   return text.trim() || null;
 }
@@ -82,11 +96,17 @@ async function getSheets() {
 }
 
 async function ensureHeaders(sheets) {
-  const need = {
-    // добавили voice_url и voice_text
-    DialogState: ["chat_id","step","name","phone","company","device","model","issue","urgent","voice_url","voice_text","updated_at"],
-    Requests:    ["date","name","phone","company","device","model","issue","urgent","voice_url","voice_text","chat_id","ticket_id","status","yougile_link","notified","closed_at"]
-  };
+ const need = {
+  DialogState: [ 
+    "chat_id","step","name","phone","company","device","model","issue","urgent",
+    "voice_urls","voice_texts", // ← было 1 поле, стало два «множественных»
+    "updated_at" ],
+  Requests: [
+    "date","name","phone","company","device","model","issue","urgent",
+    "voice_urls","voice_texts", // ← тоже два
+    "chat_id","ticket_id","status","yougile_link","notified","closed_at"
+  ]
+};
   const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
   const titles = (meta.data.sheets || []).map(s => s.properties.title);
 
@@ -170,8 +190,8 @@ function makeSummary(state, idx) {
 🧾 Модель: ${state[idx.model]||""}
 🛠 Проблема: ${state[idx.issue]||""}
 ⏳ Срочность: ${state[idx.urgent]||""}
-🎧 Голос: ${state[idx.voice_url] ? state[idx.voice_url] : "—"}
-🗒 Текст голоса: ${state[idx.voice_text] ? state[idx.voice_text] : "—"}
+🎧 Голос: ${state[idx.voice_urls] ? state[idx.voice_urls] : "—"}
+🗒 Текст голоса: ${state[idx.voice_texts] ? state[idx.voice_texts] : "—"}
 
 Всё верно?`;
 }
@@ -221,14 +241,13 @@ export default async function handler(req, res) {
 
       if (data === "CONFIRM") {
         const row = st.data;
-        const vline = row[idx.voice_url] ? `\n🎧 Голос: ${row[idx.voice_url]}` : "";
-        const tline = row[idx.voice_text] ? `\n🗒 Текст голоса: ${row[idx.voice_text]}` : "";
-
+        const vline = row[idx.voice_urls]  ? `\n🎧 Голос(а): ${row[idx.voice_urls]}`   : "";
+        const tline = row[idx.voice_texts] ? `\n🗒 Текст(ы): ${row[idx.voice_texts]}` : "";
         await appendRow(sheets, "Requests", [
           new Date().toISOString(),
           row[idx.name]||"", row[idx.phone]||"", row[idx.company]||"",
           row[idx.device]||"", row[idx.model]||"", row[idx.issue]||"", row[idx.urgent]||"",
-          row[idx.voice_url]||"", row[idx.voice_text]||"",
+          row[idx.voice_urls]||"", row[idx.voice_texts]||"", // ← вот тут
           String(chatId), "", "new", "", "no", ""
         ]);
 
@@ -256,14 +275,13 @@ export default async function handler(req, res) {
         res.status(200).send("ok"); return;
       }
       if (data.startsWith("EDIT:")) {
-        const field = data.split(":")[1];
-        await setField(sheets, st.rowNum, head, "step", "ask_"+field);
+        const field = data.split(":")[1]; // name/phone/...
+        await setField(sheets, st.rowNum, head, "step", "edit_"+field); // ← именно edit_*
         const kbd = field==="device" ? KBD_DEVICE : (field==="urgent" ? KBD_URGENT : KBD_MAIN);
         await tgSend(chatId, PROMPT[field] || "Введите значение:", kbd);
         res.status(200).send("ok"); return;
       }
-      res.status(200).send("ok"); return;
-    }
+
 
     // ==== Text / Voice messages
     const msg = update.message || {};
@@ -293,26 +311,41 @@ export default async function handler(req, res) {
     }
 
     // если пользователь прислал voice — прикрепим к заявке и распознаем
-    if (msg.voice && msg.voice.file_id) {
-      await tgAction(chatId, "record_voice");
-      const link = await tgFileLink(msg.voice.file_id);
-      const st0  = await findStateRow(sheets, chatId);
-      if (link) {
-        await setField(sheets, st0.rowNum, st0.head, "voice_url", link);
-        // распознаем (может занять 1–2 с)
-        const transcript = await transcribeByDeepgram(link, "ru").catch(()=>null);
-        if (transcript) {
-          await setField(sheets, st0.rowNum, st0.head, "voice_text", transcript);
-          await tgSend(chatId, "🎙 Голосовое прикрепил к заявке.\n🗒 Текст распознан и сохранён.");
-        } else {
-          await tgSend(chatId, "🎙 Голосовое прикрепил к заявке. Распознать не удалось, но ссылка сохранена.");
-        }
-      } else {
-        await tgSend(chatId, "🎙 Не получилось получить ссылку для голосового. Повторите, пожалуйста.");
-      }
-      // продолжаем сценарий: дальше обычные шаги
-    }
+   if (msg.voice && msg.voice.file_id) {
+  await tgAction(chatId, "record_voice");
 
+  const fileId = msg.voice.file_id;
+  const mime   = msg.voice.mime_type || "audio/ogg";
+
+  const st0 = await findStateRow(sheets, chatId);
+  const head = st0.head, idx = st0.idx;
+
+  // 1) ссылка (на всякий случай тоже сохраним)
+  const link = await tgFileLink(fileId);
+
+  // 2) распознаём байтами (надёжно)
+  let transcript = null;
+  try {
+    transcript = await transcribeVoiceFromTelegram(fileId, mime, "ru");
+  } catch (_) {}
+
+  // 3) аппендим к уже существующим значениям
+  const prevUrls  = (st0.data[idx.voice_urls]  || "").trim();
+  const prevTexts = (st0.data[idx.voice_texts] || "").trim();
+
+  const newUrls  = link ? (prevUrls ? prevUrls + "\n" + link : link) : prevUrls;
+  const newTexts = transcript ? (prevTexts ? prevTexts + "\n" + transcript : transcript) : prevTexts;
+
+  if (newUrls !== prevUrls)   await setField(sheets, st0.rowNum, head, "voice_urls", newUrls);
+  if (newTexts !== prevTexts) await setField(sheets, st0.rowNum, head, "voice_texts", newTexts);
+
+  if (transcript) {
+    await tgSend(chatId, "🎙 Голосовое прикрепил к заявке.\n🗒 Текст распознан и сохранён.");
+  } else {
+    await tgSend(chatId, "🎙 Голосовое прикрепил к заявке. Распознать не удалось, но ссылка сохранена.");
+  }
+  // продолжаем сценарий (не выходим)
+}
     const st = await findStateRow(sheets, chatId);
     const head = st.head, idx = st.idx;
     const step = st.data[idx["step"]] || "ask_name";
@@ -323,6 +356,29 @@ export default async function handler(req, res) {
       await tgSend(chatId, PROMPT[field], kbd);
       await setField(sheets, st.rowNum, head, "step", "ask_"+field);
     }
+    // ---- РЕЖИМ ПРАВКИ (одного поля) ----
+      if (String(step).startsWith("edit_")) {
+        const field = String(step).slice(5); // edit_name -> name
+        const val = (text || "").trim();
+        if (!val) { await tgSend(chatId, "Введите значение."); res.status(200).send("ok"); return; }
+
+  // мини-валидация для телефона
+        if (field === "phone") {
+          const s = val.replace(/\D+/g, "");
+          const norm = (s.length===11 && (s[0]==="7"||s[0]==="8")) ? "+7"+s.slice(1) : (s.length===10 ? "+7"+s : null);
+          if (!norm) { await tgSend(chatId, "Телефон не распознан. Формат: +7XXXXXXXXXX или 8XXXXXXXXXX."); res.status(200).send("ok"); return; }
+          await setField(sheets, st.rowNum, head, "phone", norm);
+        } else {
+          await setField(sheets, st.rowNum, head, field, val);
+        }
+
+  // вернуться на подтверждение
+        await setField(sheets, st.rowNum, head, "step", "confirm");
+        const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
+        await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
+        res.status(200).send("ok"); return;
+    }
+
 
     if (step === "ask_name") {
       if (!text) { await tgSend(chatId, "Введите имя."); res.status(200).send("ok"); return; }
