@@ -97,17 +97,25 @@ async function getSheets() {
 
 async function ensureHeaders(sheets) {
   const need = {
-    DialogState: [
-      "chat_id","step","name","phone","company","device","model","issue","urgent",
-      "voice_urls","voice_texts",
-      "updated_at"
-    ],
-    Requests: [
-      "date","name","phone","company","device","model","issue","urgent",
-      "voice_urls","voice_texts",
-      "chat_id","ticket_id","status","yougile_link","notified","closed_at"
-    ]
-  };
+  DialogState: [
+    "chat_id","step","name","phone","company",
+    // новое
+    "service_type",                 // что нужно сделать (4 варианта)
+    "model","issue","qty","devices_count",
+    "delivery_deadline","repair_deadline","self_delivery",
+    // голос — как было
+    "voice_urls","voice_texts",
+    "updated_at"
+  ],
+  Requests: [
+    "date","name","phone","company",
+    "service_type","model","issue","qty","devices_count",
+    "delivery_deadline","repair_deadline","self_delivery",
+    "voice_urls","voice_texts",
+    "chat_id","ticket_id","status","yougile_link","notified","closed_at"
+  ]
+};
+
   const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
   const titles = (meta.data.sheets || []).map(s => s.properties.title);
 
@@ -168,14 +176,23 @@ const PROMPT = {
   name:    "Как вас зовут? (Фамилия не обязательна) ✍️",
   phone:   "Укажите телефон (формат +7XXXXXXXXXX или 8XXXXXXXXXX) 📱",
   company: "Как называется компания? 🏢",
-  device:  "Какое устройство? Выберите ниже ⤵️",
-  model:   "Модель устройства / картриджа (например: HP LaserJet Pro M404 / CF259A) 🧾",
-  issue:   "Кратко опишите проблему (1–2 предложения) 🛠️",
-  urgent:  "Срочность ремонта? Выберите вариант ниже ⤵️"
-};
 
+  // новое:
+  service: "Что необходимо сделать? Выберите ниже ⤵️",
+  model:   "Укажите модель устройства / картриджа (например: HP LaserJet Pro M404 / CF259A) 🧾",
+  issue:   "Кратко опишите проблему (1–2 предложения) 🛠️",
+
+  qty:               "Сколько штук? (только число) 🔢",
+  devices_count:     "Сколько единиц техники? (только число) 🔢",
+  delivery_deadline: "Когда нужна доставка? (например: сегодня/завтра/дата) 🚚",
+  repair_deadline:   "К какому сроку нужен ремонт? (например: завтра/1–2 дня/дата) 🗓️",
+  self_delivery:     "Для ускорения обработки вашей заявки вы можете самостоятельно доставить технику по адресу: г. Дубна, проспект Боголюбова, 15, офис 39.\nЕсть ли возможность доставить самостоятельно? ⤵️"
+};
+const START_KBD = {keyboard: [[{ text: "▶️ Старт" }, { text: "❌ Отмена" }]],resize_keyboard: true};
+const SERVICE_KBD = {keyboard: [[{ text: "Заказ картриджей" }, { text: "Ремонт оргтехники" }],[{ text: "Заправка картриджей" }, { text: "Вызвать мастера в офис" }]], resize_keyboard: true,one_time_keyboard: true};
 const KBD_MAIN   = { keyboard: [[{ text: "❌ Отмена /stop" }]], resize_keyboard: true };
 const KBD_DEVICE = { keyboard: [[{text:"🖨 Принтер"},{text:"🖨 МФУ"},{text:"📠 Копир"}],[{text:"🧰 Другое"}]], resize_keyboard:true, one_time_keyboard:true };
+const YESNO_KBD = {keyboard: [[{ text: "Да" }, { text: "Нет" }]],resize_keyboard: true,one_time_keyboard: true};
 const KBD_URGENT = { keyboard: [[{text:"⏱ В течение дня"},{text:"📅 Завтра"}],[{text:"🕑 1–2 дня"}]], resize_keyboard:true, one_time_keyboard:true };
 const YESNO_INLINE = { inline_keyboard: [[{text:"✅ Подтвердить", callback_data:"CONFIRM"}],[{text:"✏️ Исправить…", callback_data:"EDIT_MENU"}]] };
 const EDIT_INLINE  = { inline_keyboard: [[{text:"👤 Имя", callback_data:"EDIT:name"},{text:"📱 Телефон", callback_data:"EDIT:phone"}],[{text:"🏢 Компания", callback_data:"EDIT:company"},{text:"🖨 Устройство", callback_data:"EDIT:device"}],[{text:"🧾 Модель", callback_data:"EDIT:model"},{text:"🛠 Проблема", callback_data:"EDIT:issue"}],[{text:"⏳ Срочность", callback_data:"EDIT:urgent"}],[{text:"⬅️ Назад", callback_data:"BACK"}]] };
@@ -186,16 +203,21 @@ function makeSummary(state, idx) {
 👤 Имя: ${state[idx.name]||""}
 📱 Тел: ${state[idx.phone]||""}
 🏢 Компания: ${state[idx.company]||""}
-🖨 Устройство: ${state[idx.device]||""}
+
+🧭 Услуга: ${state[idx.service_type]||""}
 🧾 Модель: ${state[idx.model]||""}
 🛠 Проблема: ${state[idx.issue]||""}
-⏳ Срочность: ${state[idx.urgent]||""}
+🔢 Кол-во (картриджи): ${state[idx.qty]||""}
+🖨 Кол-во техники: ${state[idx.devices_count]||""}
+🚚 Срок доставки: ${state[idx.delivery_deadline]||""}
+🗓️ Срок ремонта: ${state[idx.repair_deadline]||""}
+📦 Самодоставка: ${state[idx.self_delivery]||""}
+
 🎧 Голос: ${state[idx.voice_urls] ? state[idx.voice_urls] : "—"}
 🗒 Текст голоса: ${state[idx.voice_texts] ? state[idx.voice_texts] : "—"}
 
 Всё верно?`;
 }
-
 // ==== Dialog state
 async function findStateRow(sheets, chatId) {
   const rows = await readAll(sheets, "DialogState!A:Z");
@@ -252,13 +274,16 @@ export default async function handler(req, res) {
         const vline = row[idx.voice_urls]  ? `\n🎧 Голос(а): ${row[idx.voice_urls]}`   : "";
         const tline = row[idx.voice_texts] ? `\n🗒 Текст(ы): ${row[idx.voice_texts]}` : "";
 
-        await appendRow(sheets, "Requests", [
-          new Date().toISOString(),
-          row[idx.name]||"", row[idx.phone]||"", row[idx.company]||"",
-          row[idx.device]||"", row[idx.model]||"", row[idx.issue]||"", row[idx.urgent]||"",
-          row[idx.voice_urls]||"", row[idx.voice_texts]||"",
-          String(chatId), "", "new", "", "no", ""
-        ]);
+       await appendRow(sheets, "Requests", [
+         new Date().toISOString(),
+         row[idx.name]||"", row[idx.phone]||"", row[idx.company]||"",
+         row[idx.service_type]||"", row[idx.model]||"", row[idx.issue]||"",
+         row[idx.qty]||"", row[idx.devices_count]||"",
+         row[idx.delivery_deadline]||"", row[idx.repair_deadline]||"", row[idx.self_delivery]||"",
+         row[idx.voice_urls]||"", row[idx.voice_texts]||"",
+         String(chatId), "", "new", "", "no", ""
+       ]);
+
 
         if (WORK_CHAT_ID) {
           await tgSend(WORK_CHAT_ID,
@@ -360,15 +385,33 @@ export default async function handler(req, res) {
     }
     if (text === "/start") {
       const st = await findStateRow(sheets, chatId);
-      for (const f of ["name","phone","company","device","model","issue","urgent","voice_urls","voice_texts"]) {
+      // очистим все поля нового сценария
+      for (const f of [
+        "name","phone","company","service_type","model","issue",
+        "qty","devices_count","delivery_deadline","repair_deadline","self_delivery","voice_urls","voice_texts"
+      ]) {
         await setField(sheets, st.rowNum, st.head, f, "");
       }
-      await setField(sheets, st.rowNum, st.head, "step", "ask_name");
-      const about = "Здравствуйте! Я бот приёма заявок по обслуживанию оргтехники.\nСоберу заявку и передам специалистам. Это займёт 1–2 минуты.";
-      if (BOT_BANNER_URL) await tgPhoto(chatId, BOT_BANNER_URL, about); else await tgSend(chatId, about);
-      await tgSend(chatId, PROMPT.name, KBD_MAIN);
+      await setField(sheets, st.rowNum, st.head, "step", "wait_start");
+      const about = "Здравствуйте! Я бот приёма заявок по обслуживанию оргтехники.\nНажмите «Старт», чтобы начать, либо «Отмена».";
+      if (BOT_BANNER_URL) await tgPhoto(chatId, BOT_BANNER_URL, about, START_KBD);
+      else await tgSend(chatId, about, START_KBD);
       res.status(200).send("ok"); return;
     }
+    // старт / отмена
+    if (text === "❌ Отмена") {
+      const st = await findStateRow(sheets, chatId);
+      await setField(sheets, st.rowNum, st.head, "step", "stopped");
+      await tgSend(chatId, "Ок, остановил. Чтобы начать заново — /start", START_KBD);
+      res.status(200).send("ok"); return;
+    }
+    if (text === "▶️ Старт") {
+      const st = await findStateRow(sheets, chatId);
+      await setField(sheets, st.rowNum, st.head, "step", "ask_name");
+      await tgSend(chatId, PROMPT.name);
+      res.status(200).send("ok"); return;
+    }
+
 
     // === ДИАЛОГ ===
     const st = await findStateRow(sheets, chatId);
@@ -398,12 +441,13 @@ export default async function handler(req, res) {
 
     // ---- ОБЫЧНЫЕ ШАГИ ask_*
     async function ask(field) {
-      const kbd = field==="device" ? KBD_DEVICE : (field==="urgent" ? KBD_URGENT : KBD_MAIN);
+      let kbd = KBD_MAIN;
+      if (field === "service") kbd = SERVICE_KBD;
+      else if (field === "self_delivery") kbd = YESNO_KBD;
       await tgAction(chatId, "typing");
       await tgSend(chatId, PROMPT[field], kbd);
       await setField(sheets, st.rowNum, head, "step", "ask_"+field);
     }
-
     if (step === "ask_name") {
       if (!text) { await tgSend(chatId, "Введите имя."); res.status(200).send("ok"); return; }
       await setField(sheets, st.rowNum, head, "name", text); await ask("phone"); res.status(200).send("ok"); return;
@@ -418,18 +462,107 @@ export default async function handler(req, res) {
       if (!text) { await tgSend(chatId, "Укажите название компании."); res.status(200).send("ok"); return; }
       await setField(sheets, st.rowNum, head, "company", text); await ask("device"); res.status(200).send("ok"); return;
     }
+    if (step === "ask_service") {
+      const v = (text || "").trim();
+      const options = ["Заказ картриджей","Ремонт оргтехники","Заправка картриджей","Вызвать мастера в офис"];
+      if (!options.includes(v)) {
+        await tgSend(chatId, "Выберите вариант на клавиатуре.", SERVICE_KBD);
+        res.status(200).send("ok"); return;
+      }
+      await setField(sheets, st.rowNum, head, "service_type", v);
+      if (v === "Заказ картриджей") {
+        await ask("model");
+      } else if (v === "Ремонт оргтехники") {
+        await ask("model");
+      } else if (v === "Заправка картриджей") {
+        await ask("model");
+      } else if (v === "Вызвать мастера в офис") {
+        await ask("issue");
+      }
+      res.status(200).send("ok"); return;
+    }
     if (step === "ask_device") {
       if (!text) { await tgSend(chatId, "Выберите устройство на клавиатуре или введите текстом."); res.status(200).send("ok"); return; }
       await setField(sheets, st.rowNum, head, "device", text); await ask("model"); res.status(200).send("ok"); return;
     }
     if (step === "ask_model") {
       if (!text) { await tgSend(chatId, "Укажите модель устройства/картриджа."); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "model", text); await ask("issue"); res.status(200).send("ok"); return;
+      await setField(sheets, st.rowNum, head, "model", text);
+      const service = st.data[ idx["service_type"] ];
+      if (service === "Заказ картриджей") {
+        await ask("qty");
+      } else if (service === "Ремонт оргтехники") {
+        await ask("issue");
+      } else if (service === "Заправка картриджей") {
+        await ask("qty");
+      } else {
+        // на мастера сюда обычно не попадаем
+        await ask("issue");
+      }
+      res.status(200).send("ok"); return;
+    }
+    if (step === "ask_qty") {
+      const n = parseInt(String(text||"").trim(), 10);
+      if (!(n > 0)) { await tgSend(chatId, "Введите положительное число."); res.status(200).send("ok"); return; }
+      await setField(sheets, st.rowNum, head, "qty", String(n));
+      const service = st.data[idx["service_type"]];
+      if (service === "Заказ картриджей") {
+        await ask("delivery_deadline");
+      } else if (service === "Заправка картриджей") {
+        await ask("self_delivery"); // вопрос про самодоставку перед подтверждением
+      } else {
+        await ask("issue"); // fallback
+      }
+      res.status(200).send("ok"); return;
     }
     if (step === "ask_issue") {
       if (!text) { await tgSend(chatId, "Опишите проблему в 1–2 предложениях."); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "issue", text); await ask("urgent"); res.status(200).send("ok"); return;
+      await setField(sheets, st.rowNum, head, "issue", text);
+      const service = st.data[idx["service_type"]];
+      if (service === "Ремонт оргтехники") {
+        await ask("devices_count");
+      } else if (service === "Вызвать мастера в офис") {
+        // сразу к подтверждению
+        await setField(sheets, st.rowNum, head, "step", "confirm");
+        const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
+        await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
+      } else {
+        // прочие ветки уже обработаны
+      }
+      res.status(200).send("ok"); return;
     }
+    if (step === "ask_devices_count") {
+      const n = parseInt(String(text||"").trim(), 10);
+      if (!(n > 0)) { await tgSend(chatId, "Введите положительное число."); res.status(200).send("ok"); return; }
+      await setField(sheets, st.rowNum, head, "devices_count", String(n));
+      await ask("repair_deadline");
+      res.status(200).send("ok"); return;
+    }
+     if (step === "ask_delivery_deadline") {
+       await setField(sheets, st.rowNum, head, "delivery_deadline", (text||"").trim());
+       // заказ картриджей → сразу подтверждение
+       await setField(sheets, st.rowNum, head, "step", "confirm");
+       const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
+       await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
+       res.status(200).send("ok"); return;
+     }
+    if (step === "ask_repair_deadline") {
+      await setField(sheets, st.rowNum, head, "repair_deadline", (text||"").trim());
+      // ремонт → спросим про самодоставку
+      await ask("self_delivery");
+      res.status(200).send("ok"); return;
+    }
+    if (step === "ask_self_delivery") {
+      const v = (text||"").toLowerCase();
+      const val = v.includes("да") ? "Да" : v.includes("нет") ? "Нет" : null;
+      if (!val) { await tgSend(chatId, "Выберите «Да» или «Нет».", YESNO_KBD); res.status(200).send("ok"); return; }
+      await setField(sheets, st.rowNum, head, "self_delivery", val);
+      await setField(sheets, st.rowNum, head, "step", "confirm");
+      const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
+      await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
+      res.status(200).send("ok"); return;
+    }
+
     if (step === "ask_urgent") {
       const v = (text || "").toLowerCase();
       const ok = ["в течение дня","завтра","1–2 дня","1-2 дня"].some(k => v.includes(k));
