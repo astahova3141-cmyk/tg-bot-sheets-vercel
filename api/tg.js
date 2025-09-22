@@ -76,7 +76,7 @@ async function transcribeVoiceFromTelegram(fileId, mime = "audio/ogg", lang = "r
       "Authorization": `Token ${DEEPGRAM_API_KEY}`,
       "Content-Type": mime || "application/octet-stream"
     },
-    body: Buffer.from(buf) // Node 18 поддерживает Buffer в fetch
+    body: Buffer.from(buf)
   });
 
   if (!resp.ok) return null;
@@ -96,17 +96,18 @@ async function getSheets() {
 }
 
 async function ensureHeaders(sheets) {
- const need = {
-  DialogState: [ 
-    "chat_id","step","name","phone","company","device","model","issue","urgent",
-    "voice_urls","voice_texts", // ← было 1 поле, стало два «множественных»
-    "updated_at" ],
-  Requests: [
-    "date","name","phone","company","device","model","issue","urgent",
-    "voice_urls","voice_texts", // ← тоже два
-    "chat_id","ticket_id","status","yougile_link","notified","closed_at"
-  ]
-};
+  const need = {
+    DialogState: [
+      "chat_id","step","name","phone","company","device","model","issue","urgent",
+      "voice_urls","voice_texts",
+      "updated_at"
+    ],
+    Requests: [
+      "date","name","phone","company","device","model","issue","urgent",
+      "voice_urls","voice_texts",
+      "chat_id","ticket_id","status","yougile_link","notified","closed_at"
+    ]
+  };
   const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
   const titles = (meta.data.sheets || []).map(s => s.properties.title);
 
@@ -159,7 +160,6 @@ async function updateCell(sheets, sheet, row, colLetter, value) {
 }
 
 function colLetterFromIndex(idx) { // 0-based
-  // простая A..Z, достаточно для наших заголовков
   return String.fromCharCode(65 + idx);
 }
 
@@ -223,7 +223,11 @@ async function setField(sheets, rowNum, head, field, value) {
 
 // ==== Handler
 export default async function handler(req, res) {
-  if (req.method !== "POST") { res.status(200).send("ok"); return; }
+  // быстрый ответ на не-POST
+  if (req.method !== "POST") { 
+    res.status(200).send("ok"); 
+    return; 
+  }
 
   try {
     const sheets = await getSheets();
@@ -233,45 +237,26 @@ export default async function handler(req, res) {
     const cb  = update.callback_query || null;
     const msg = update.message || {};
 
+    // объявляем ОДИН раз
     const chatId = cb ? cb.message?.chat?.id : msg.chat?.id;
     const text   = (msg.text || "").trim();
     const cbData = cb ? String(cb.data || "") : null;
 
-    // --- callback-кнопки ---
+    // === CALLBACK-КНОПКИ ===
     if (cb) {
-      // тут НЕ объявляй chatId заново
-      // используй chatId и cbData
-      // ...
-      res.status(200).send("ok"); return;
-    }
-
-    // --- voice / команды / диалог ---
-    // тут тоже НЕ объявляй chatId заново
-    // ...
-    res.status(200).send("ok"); return;
-
-  } catch (e) {
-    console.error(e);
-    res.status(200).send("ok");
-  }
-}
-
-    // ==== Inline buttons
-    if (update.callback_query) {
-      const chatId = update.callback_query.message.chat.id;
-      const data   = String(update.callback_query.data || "");
       const st = await findStateRow(sheets, chatId);
       const head = st.head, idx = st.idx;
 
-      if (data === "CONFIRM") {
+      if (cbData === "CONFIRM") {
         const row = st.data;
         const vline = row[idx.voice_urls]  ? `\n🎧 Голос(а): ${row[idx.voice_urls]}`   : "";
         const tline = row[idx.voice_texts] ? `\n🗒 Текст(ы): ${row[idx.voice_texts]}` : "";
+
         await appendRow(sheets, "Requests", [
           new Date().toISOString(),
           row[idx.name]||"", row[idx.phone]||"", row[idx.company]||"",
           row[idx.device]||"", row[idx.model]||"", row[idx.issue]||"", row[idx.urgent]||"",
-          row[idx.voice_urls]||"", row[idx.voice_texts]||"", // ← вот тут
+          row[idx.voice_urls]||"", row[idx.voice_texts]||"",
           String(chatId), "", "new", "", "no", ""
         ]);
 
@@ -291,31 +276,82 @@ export default async function handler(req, res) {
         res.status(200).send("ok"); return;
       }
 
-      if (data === "EDIT_MENU") { await tgSend(chatId, "Что исправим?", EDIT_INLINE); res.status(200).send("ok"); return; }
-      if (data === "BACK") {
+      if (cbData === "EDIT_MENU") { 
+        await tgSend(chatId, "Что исправим?", EDIT_INLINE); 
+        res.status(200).send("ok"); return; 
+      }
+
+      if (cbData === "BACK") {
         await setField(sheets, st.rowNum, head, "step", "confirm");
         const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
         await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
         res.status(200).send("ok"); return;
       }
-      if (data.startsWith("EDIT:")) {
-        const field = data.split(":")[1]; // name/phone/...
-        await setField(sheets, st.rowNum, head, "step", "edit_"+field); // ← именно edit_*
+
+      if (cbData && cbData.startsWith("EDIT:")) {
+        const field = cbData.split(":")[1];
+        await setField(sheets, st.rowNum, head, "step", "edit_"+field); // режим правки
         const kbd = field==="device" ? KBD_DEVICE : (field==="urgent" ? KBD_URGENT : KBD_MAIN);
         await tgSend(chatId, PROMPT[field] || "Введите значение:", kbd);
         res.status(200).send("ok"); return;
       }
 
+      res.status(200).send("ok"); return;
+    }
 
-    // ==== Text / Voice messages
-    const msg = update.message || {};
-    const chatId = msg.chat?.id;
-    const text = (msg.text || "").trim();
+    // === VOICE (если есть) ===
+    if (msg.voice && msg.voice.file_id) {
+      await tgAction(chatId, "record_voice");
 
-    // системные команды
-    if (text === "/ping") { await tgSend(chatId, "ALIVE ✅"); res.status(200).send("ok"); return; }
-    if (text === "/help") { await tgSend(chatId, "Команды:\n/start — начать заново\n/stop — отменить\n/id — ваш Chat ID\n/help — помощь"); res.status(200).send("ok"); return; }
-    if (text === "/id")   { await tgSend(chatId, "Chat ID: " + chatId); res.status(200).send("ok"); return; }
+      const fileId = msg.voice.file_id;
+      const mime   = msg.voice.mime_type || "audio/ogg";
+
+      const st0 = await findStateRow(sheets, chatId);
+      const head0 = st0.head, idx0 = st0.idx;
+
+      // 1) ссылка (на всякий случай тоже сохраним)
+      const link = await tgFileLink(fileId);
+
+      // 2) распознаём байтами (надёжно)
+      let transcript = null;
+      try {
+        transcript = await transcribeVoiceFromTelegram(fileId, mime, "ru");
+      } catch (_) {}
+
+      // 3) аппендим к уже существующим значениям
+      const prevUrls  = (st0.data[idx0.voice_urls]  || "").trim();
+      const prevTexts = (st0.data[idx0.voice_texts] || "").trim();
+
+      const newUrls  = link ? (prevUrls ? prevUrls + "\n" + link : link) : prevUrls;
+      const newTexts = transcript ? (prevTexts ? prevTexts + "\n" + transcript : transcript) : prevTexts;
+
+      if (newUrls !== prevUrls)   await setField(sheets, st0.rowNum, head0, "voice_urls", newUrls);
+      if (newTexts !== prevTexts) await setField(sheets, st0.rowNum, head0, "voice_texts", newTexts);
+
+      if (transcript) {
+        await tgSend(chatId, "🎙 Голосовое прикрепил к заявке.\n🗒 Текст распознан и сохранён.");
+      } else {
+        await tgSend(chatId, "🎙 Голосовое прикрепил к заявке. Распознать не удалось, но ссылка сохранена.");
+      }
+      // продолжаем сценарий
+    }
+
+    // === КОМАНДЫ ===
+    if (text === "/ping") { 
+      await tgSend(chatId, "ALIVE ✅"); 
+      res.status(200).send("ok"); 
+      return; 
+    }
+    if (text === "/help") { 
+      await tgSend(chatId, "Команды:\n/start — начать заново\n/stop — отменить\n/id — ваш Chat ID\n/help — помощь"); 
+      res.status(200).send("ok"); 
+      return; 
+    }
+    if (text === "/id")   { 
+      await tgSend(chatId, "Chat ID: " + chatId); 
+      res.status(200).send("ok"); 
+      return; 
+    }
     if (text === "/stop") {
       const st = await findStateRow(sheets, chatId);
       await setField(sheets, st.rowNum, st.head, "step", "stopped");
@@ -324,7 +360,7 @@ export default async function handler(req, res) {
     }
     if (text === "/start") {
       const st = await findStateRow(sheets, chatId);
-      for (const f of ["name","phone","company","device","model","issue","urgent","voice_url","voice_text"]) {
+      for (const f of ["name","phone","company","device","model","issue","urgent","voice_urls","voice_texts"]) {
         await setField(sheets, st.rowNum, st.head, f, "");
       }
       await setField(sheets, st.rowNum, st.head, "step", "ask_name");
@@ -334,75 +370,39 @@ export default async function handler(req, res) {
       res.status(200).send("ok"); return;
     }
 
-    // если пользователь прислал voice — прикрепим к заявке и распознаем
-   if (msg.voice && msg.voice.file_id) {
-  await tgAction(chatId, "record_voice");
-
-  const fileId = msg.voice.file_id;
-  const mime   = msg.voice.mime_type || "audio/ogg";
-
-  const st0 = await findStateRow(sheets, chatId);
-  const head = st0.head, idx = st0.idx;
-
-  // 1) ссылка (на всякий случай тоже сохраним)
-  const link = await tgFileLink(fileId);
-
-  // 2) распознаём байтами (надёжно)
-  let transcript = null;
-  try {
-    transcript = await transcribeVoiceFromTelegram(fileId, mime, "ru");
-  } catch (_) {}
-
-  // 3) аппендим к уже существующим значениям
-  const prevUrls  = (st0.data[idx.voice_urls]  || "").trim();
-  const prevTexts = (st0.data[idx.voice_texts] || "").trim();
-
-  const newUrls  = link ? (prevUrls ? prevUrls + "\n" + link : link) : prevUrls;
-  const newTexts = transcript ? (prevTexts ? prevTexts + "\n" + transcript : transcript) : prevTexts;
-
-  if (newUrls !== prevUrls)   await setField(sheets, st0.rowNum, head, "voice_urls", newUrls);
-  if (newTexts !== prevTexts) await setField(sheets, st0.rowNum, head, "voice_texts", newTexts);
-
-  if (transcript) {
-    await tgSend(chatId, "🎙 Голосовое прикрепил к заявке.\n🗒 Текст распознан и сохранён.");
-  } else {
-    await tgSend(chatId, "🎙 Голосовое прикрепил к заявке. Распознать не удалось, но ссылка сохранена.");
-  }
-  // продолжаем сценарий (не выходим)
-}
+    // === ДИАЛОГ ===
     const st = await findStateRow(sheets, chatId);
     const head = st.head, idx = st.idx;
     const step = st.data[idx["step"]] || "ask_name";
 
+    // ---- РЕЖИМ ПРАВКИ (одного поля) ----
+    if (String(step).startsWith("edit_")) {
+      const field = String(step).slice(5); // edit_name -> name
+      const val = (text || "").trim();
+      if (!val) { await tgSend(chatId, "Введите значение."); res.status(200).send("ok"); return; }
+
+      if (field === "phone") {
+        const s = val.replace(/\D+/g, "");
+        const norm = (s.length===11 && (s[0]==="7"||s[0]==="8")) ? "+7"+s.slice(1) : (s.length===10 ? "+7"+s : null);
+        if (!norm) { await tgSend(chatId, "Телефон не распознан. Формат: +7XXXXXXXXXX или 8XXXXXXXXXX."); res.status(200).send("ok"); return; }
+        await setField(sheets, st.rowNum, head, "phone", norm);
+      } else {
+        await setField(sheets, st.rowNum, head, field, val);
+      }
+
+      await setField(sheets, st.rowNum, head, "step", "confirm");
+      const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
+      await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
+      res.status(200).send("ok"); return;
+    }
+
+    // ---- ОБЫЧНЫЕ ШАГИ ask_*
     async function ask(field) {
       const kbd = field==="device" ? KBD_DEVICE : (field==="urgent" ? KBD_URGENT : KBD_MAIN);
       await tgAction(chatId, "typing");
       await tgSend(chatId, PROMPT[field], kbd);
       await setField(sheets, st.rowNum, head, "step", "ask_"+field);
     }
-    // ---- РЕЖИМ ПРАВКИ (одного поля) ----
-      if (String(step).startsWith("edit_")) {
-        const field = String(step).slice(5); // edit_name -> name
-        const val = (text || "").trim();
-        if (!val) { await tgSend(chatId, "Введите значение."); res.status(200).send("ok"); return; }
-
-  // мини-валидация для телефона
-        if (field === "phone") {
-          const s = val.replace(/\D+/g, "");
-          const norm = (s.length===11 && (s[0]==="7"||s[0]==="8")) ? "+7"+s.slice(1) : (s.length===10 ? "+7"+s : null);
-          if (!norm) { await tgSend(chatId, "Телефон не распознан. Формат: +7XXXXXXXXXX или 8XXXXXXXXXX."); res.status(200).send("ok"); return; }
-          await setField(sheets, st.rowNum, head, "phone", norm);
-        } else {
-          await setField(sheets, st.rowNum, head, field, val);
-        }
-
-  // вернуться на подтверждение
-        await setField(sheets, st.rowNum, head, "step", "confirm");
-        const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
-        await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
-        res.status(200).send("ok"); return;
-    }
-
 
     if (step === "ask_name") {
       if (!text) { await tgSend(chatId, "Введите имя."); res.status(200).send("ok"); return; }
@@ -446,13 +446,16 @@ export default async function handler(req, res) {
       res.status(200).send("ok"); return;
     }
 
+    // дефолт
     await tgSend(chatId, "Давайте начнём заново: /start");
-    res.status(200).send("ok"); return;
+    res.status(200).send("ok"); 
+    return;
 
   } catch (e) {
     console.error(e);
     // Даже в случае ошибки отвечаем 200, чтобы Telegram не спамил ретраями
     res.status(200).send("ok");
+    return;
   }
 }
 
