@@ -223,7 +223,6 @@ async function setField(sheets, rowNum, head, field, value) {
 
 // ==== Handler
 export default async function handler(req, res) {
-  // Всегда отвечаем 200 на не-POST (Telegram доволен, нет ретраев)
   if (req.method !== "POST") { res.status(200).send("ok"); return; }
 
   try {
@@ -231,6 +230,31 @@ export default async function handler(req, res) {
     await ensureHeaders(sheets);
 
     const update = req.body || {};
+    const cb  = update.callback_query || null;
+    const msg = update.message || {};
+
+    const chatId = cb ? cb.message?.chat?.id : msg.chat?.id;
+    const text   = (msg.text || "").trim();
+    const cbData = cb ? String(cb.data || "") : null;
+
+    // --- callback-кнопки ---
+    if (cb) {
+      // тут НЕ объявляй chatId заново
+      // используй chatId и cbData
+      // ...
+      res.status(200).send("ok"); return;
+    }
+
+    // --- voice / команды / диалог ---
+    // тут тоже НЕ объявляй chatId заново
+    // ...
+    res.status(200).send("ok"); return;
+
+  } catch (e) {
+    console.error(e);
+    res.status(200).send("ok");
+  }
+}
 
     // ==== Inline buttons
     if (update.callback_query) {
