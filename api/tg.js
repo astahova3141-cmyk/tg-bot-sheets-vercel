@@ -1,6 +1,9 @@
 // api/tg.js — Telegram → Google Sheets + Voice (Deepgram), Node 18+ on Vercel
 
 import { google } from "googleapis";
+import { verifyTelegramSecret, dedupeUpdate, rateLimit, sanitizeCell, voiceAllowed } from "../security.js";
+import { sanitizeCell } from "../security.js";
+
 
 // ==== ENV
 const BOT_TOKEN        = process.env.BOT_TOKEN || "";
@@ -8,6 +11,7 @@ const SHEET_ID         = process.env.SHEET_ID || "";
 const WORK_CHAT_ID     = process.env.WORK_CHAT_ID || "";
 const BOT_BANNER_URL   = process.env.BOT_BANNER_URL || "";
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY || "";
+const TG_SECRET_TOKEN  = process.env.TG_SECRET_TOKEN || ""; // тот же, что передаём в setWebhook
 
 const TGBOT = BOT_TOKEN ? `https://api.telegram.org/bot${BOT_TOKEN}` : "";
 
@@ -275,6 +279,24 @@ export default async function handler(req, res) {
   if (req.method !== "POST") { res.status(200).send("ok"); return; }
 
   try {
+       if (req.method !== "POST") { 
+     res.status(200).send("ok"); 
+     return; 
+   }
+ 
+   try {
+     // 1) Верификация источника (Telegram)
+     if (!verifyTelegramSecret(req, TG_SECRET_TOKEN)) {
+       res.status(200).send("ok");
+       return;
+     }
+     // 2) БЫСТРАЯ проверка дедупликации по update_id
+     const prelimUpdate = req.body || {};
+     if (await dedupeUpdate(prelimUpdate.update_id)) {
+       res.status(200).send("ok");
+       return;
+     }
+
     const sheets = await getSheets();
     await ensureHeaders(sheets);
 
@@ -286,6 +308,13 @@ export default async function handler(req, res) {
     const text   = (msg.text || "").trim();
     const cbData = cb ? String(cb.data || "") : null;
 
+ // 3) Рейт-лимит на чат (3 сек по умолчанию)
+     if (await rateLimit(chatId, 2)) { // можно 2–3 сек
+       res.status(200).send("ok");
+       return;
+     }
+
+
     // === CALLBACK-КНОПКИ ===
     if (cb) {
       const st = await findStateRow(sheets, chatId);
@@ -295,17 +324,15 @@ export default async function handler(req, res) {
         const row = st.data;
         const vline = row[idx.voice_urls]  ? `\n🎧 Голос(а): ${row[idx.voice_urls]}`   : "";
         const tline = row[idx.voice_texts] ? `\n🗒 Текст(ы): ${row[idx.voice_texts]}` : "";
-
         await appendRow(sheets, "Requests", [
           new Date().toISOString(),
-          row[idx.name]||"", row[idx.phone]||"", row[idx.company]||"",
-          row[idx.service_type]||"", row[idx.model]||"", row[idx.issue]||"",
-          row[idx.qty]||"", row[idx.devices_count]||"",
-          row[idx.delivery_deadline]||"", row[idx.repair_deadline]||"", row[idx.self_delivery]||"",
-          row[idx.voice_urls]||"", row[idx.voice_texts]||"",
+          sanitizeCell(row[idx.name]||""), sanitizeCell(row[idx.phone]||""), sanitizeCell(row[idx.company]||""),
+          sanitizeCell(row[idx.service_type]||""), sanitizeCell(row[idx.model]||""), sanitizeCell(row[idx.issue]||""),
+          sanitizeCell(row[idx.qty]||""), sanitizeCell(row[idx.devices_count]||""),
+          sanitizeCell(row[idx.delivery_deadline]||""), sanitizeCell(row[idx.repair_deadline]||""), sanitizeCell(row[idx.self_delivery]||""),
+          sanitizeCell(row[idx.voice_urls]||""), sanitizeCell(row[idx.voice_texts]||""),
           String(chatId), "", "new", "", "no", ""
         ]);
-
         if (WORK_CHAT_ID) {
           const card = [];
           const add = (label, value) => {
@@ -366,7 +393,14 @@ export default async function handler(req, res) {
     }
 
     // === VOICE ===
+  
     if (msg.voice && msg.voice.file_id) {
+      if (!voiceAllowed(msg, 60)) { // до 60 сек
+        await tgSend(chatId, "Голосовое слишком длинное (максимум 60 секунд).");
+        res.status(200).send("ok"); return;
+      }
+       await tgAction(chatId, "record_voice");
+
       await tgAction(chatId, "record_voice");
       const fileId = msg.voice.file_id;
       const mime   = msg.voice.mime_type || "audio/ogg";
@@ -381,9 +415,10 @@ export default async function handler(req, res) {
       const prevTexts = (st0.data[idx0.voice_texts] || "").trim();
       const newUrls  = link ? (prevUrls ? prevUrls + "\n" + link : link) : prevUrls;
       const newTexts = transcript ? (prevTexts ? prevTexts + "\n" + transcript : transcript) : prevTexts;
+      
+      if (newUrls !== prevUrls)   await setField(sheets, st0.rowNum, head0, "voice_urls", sanitizeCell(newUrls));
+      if (newTexts !== prevTexts) await setField(sheets, st0.rowNum, head0, "voice_texts", sanitizeCell(newTexts));
 
-      if (newUrls !== prevUrls)   await setField(sheets, st0.rowNum, head0, "voice_urls", newUrls);
-      if (newTexts !== prevTexts) await setField(sheets, st0.rowNum, head0, "voice_texts", newTexts);
 
       await tgSend(chatId, transcript
         ? "🎙 Голосовое прикрепил к заявке.\n🗒 Текст распознан и сохранён."
@@ -451,8 +486,7 @@ export default async function handler(req, res) {
         const n = parseInt(val, 10); if (!(n>0)) { await tgSend(chatId, "Введите положительное число."); res.status(200).send("ok"); return; }
         val = String(n);
       }
-
-      await setField(sheets, st.rowNum, head, targetField, val);
+      await setField(sheets, st.rowNum, head, targetField, sanitizeCell(val));
       await setField(sheets, st.rowNum, head, "step", "confirm");
       const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
       await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
@@ -472,17 +506,17 @@ export default async function handler(req, res) {
     // Шаги
     if (step === "ask_name") {
       if (!text) { await tgSend(chatId, "Введите имя."); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "name", text); await ask("phone"); res.status(200).send("ok"); return;
+      await setField(sheets, st.rowNum, head, "name", sanitizeCell(text)); await ask("phone"); res.status(200).send("ok"); return;
     }
     if (step === "ask_phone") {
       const s = String(text||"").replace(/\D+/g, "");
       const norm = (s.length===11 && (s[0]==="7"||s[0]==="8")) ? "+7"+s.slice(1) : (s.length===10 ? "+7"+s : null);
       if (!norm) { await tgSend(chatId, "Телефон не распознан. Формат: +7XXXXXXXXXX или 8XXXXXXXXXX."); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "phone", norm); await ask("company"); res.status(200).send("ok"); return;
+      await setField(sheets, st.rowNum, head, "phone", sanitizeCell(norm)); await ask("company"); res.status(200).send("ok"); return;
     }
     if (step === "ask_company") {
       if (!text) { await tgSend(chatId, "Укажите название компании."); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "company", text);
+      await setField(sheets, st.rowNum, head, "company", sanitizeCell(text));
       await ask("service"); res.status(200).send("ok"); return; // ← исправлено: к выбору услуги
     }
     if (step === "ask_service") {
@@ -493,7 +527,8 @@ export default async function handler(req, res) {
         await tgSend(chatId, "Выберите вариант на клавиатуре.", SERVICE_KBD);
         res.status(200).send("ok"); return;
       }
-      await setField(sheets, st.rowNum, head, "service_type", opt.key);
+      await setField(sheets, st.rowNum, head, "service_type", sanitizeCell(opt.key));
+
       if (opt.key === "Вызвать мастера в офис") {
         await ask("issue");
       } else {
@@ -503,7 +538,7 @@ export default async function handler(req, res) {
     }
     if (step === "ask_model") {
       if (!text) { await tgSend(chatId, "Укажите модель устройства/картриджа."); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "model", text);
+      await setField(sheets, st.rowNum, head, "model", sanitizeCell(text));
       const service = st.data[idx["service_type"]];
       if (service === "Заказ картриджей")       await ask("qty");
       else if (service === "Заправка картриджей") await ask("qty");
@@ -514,7 +549,7 @@ export default async function handler(req, res) {
     if (step === "ask_qty") {
       const n = parseInt(String(text||"").trim(), 10);
       if (!(n > 0)) { await tgSend(chatId, "Введите положительное число."); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "qty", String(n));
+      await setField(sheets, st.rowNum, head, "qty", sanitizeCell(String(n)));
       const service = st.data[idx["service_type"]];
       if (service === "Заказ картриджей")      await ask("delivery_deadline");
       else if (service === "Заправка картриджей") await ask("self_delivery");
@@ -523,7 +558,7 @@ export default async function handler(req, res) {
     }
     if (step === "ask_issue") {
       if (!text) { await tgSend(chatId, "Опишите проблему в 1–2 предложениях."); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "issue", text);
+      await setField(sheets, st.rowNum, head, "issue", sanitizeCell(text));
       const service = st.data[idx["service_type"]];
       if (service === "Ремонт оргтехники") {
         await ask("devices_count");
@@ -537,19 +572,19 @@ export default async function handler(req, res) {
     if (step === "ask_devices_count") {
       const n = parseInt(String(text||"").trim(), 10);
       if (!(n > 0)) { await tgSend(chatId, "Введите положительное число."); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "devices_count", String(n));
+      await setField(sheets, st.rowNum, head, "devices_count", sanitizeCell(String(n)));
       await ask("repair_deadline");
       res.status(200).send("ok"); return;
     }
     if (step === "ask_delivery_deadline") {
-      await setField(sheets, st.rowNum, head, "delivery_deadline", (text||"").trim());
+      await setField(sheets, st.rowNum, head, "delivery_deadline", sanitizeCell((text||"").trim()));
       await setField(sheets, st.rowNum, head, "step", "confirm");
       const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
       await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
       res.status(200).send("ok"); return;
     }
     if (step === "ask_repair_deadline") {
-      await setField(sheets, st.rowNum, head, "repair_deadline", (text||"").trim());
+      await setField(sheets, st.rowNum, head, "repair_deadline", sanitizeCell((text||"").trim()));
       await ask("self_delivery");
       res.status(200).send("ok"); return;
     }
@@ -557,7 +592,7 @@ export default async function handler(req, res) {
       const v = (text||"").toLowerCase();
       const val = v.includes("да") ? "Да" : v.includes("нет") ? "Нет" : null;
       if (!val) { await tgSend(chatId, "Выберите «Да» или «Нет».", YESNO_KBD); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "self_delivery", val);
+      await setField(sheets, st.rowNum, head, "self_delivery", sanitizeCell(val));
       await setField(sheets, st.rowNum, head, "step", "confirm");
       const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
       await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
