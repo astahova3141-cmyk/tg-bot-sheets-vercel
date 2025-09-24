@@ -2,7 +2,6 @@
 
 import { google } from "googleapis";
 import { verifyTelegramSecret, dedupeUpdate, rateLimit, sanitizeCell, voiceAllowed } from "../security.js";
-import { sanitizeCell } from "../security.js";
 
 
 // ==== ENV
@@ -275,27 +274,29 @@ async function setField(sheets, rowNum, head, field, value) {
 }
 
 // ==== Handler
+
 export default async function handler(req, res) {
-  if (req.method !== "POST") { res.status(200).send("ok"); return; }
+  // 1) Быстрый ответ для не-POST
+  if (req.method !== "POST") {
+    res.status(200).send("ok");
+    return;
+  }
 
   try {
-       if (req.method !== "POST") { 
-     res.status(200).send("ok"); 
-     return; 
-   }
- 
-   try {
-     // 1) Верификация источника (Telegram)
-     if (!verifyTelegramSecret(req, TG_SECRET_TOKEN)) {
-       res.status(200).send("ok");
-       return;
-     }
-     // 2) БЫСТРАЯ проверка дедупликации по update_id
-     const prelimUpdate = req.body || {};
-     if (await dedupeUpdate(prelimUpdate.update_id)) {
-       res.status(200).send("ok");
-       return;
-     }
+    // 2) Верификация источника Telegram по секрету
+    if (!verifyTelegramSecret(req, TG_SECRET_TOKEN)) {
+      // Временная диагностика — можно оставить на время отладки:
+      // console.warn("Bad or missing X-Telegram-Bot-Api-Secret-Token");
+      res.status(200).send("ok");
+      return;
+    }
+
+    // 3) Дедуп по update_id
+    const prelimUpdate = req.body || {};
+    if (await dedupeUpdate(prelimUpdate.update_id)) {
+      res.status(200).send("ok");
+      return;
+    }
 
     const sheets = await getSheets();
     await ensureHeaders(sheets);
@@ -303,16 +304,15 @@ export default async function handler(req, res) {
     const update = req.body || {};
     const cb  = update.callback_query || null;
     const msg = update.message || {};
-
     const chatId = cb ? cb.message?.chat?.id : msg.chat?.id;
     const text   = (msg.text || "").trim();
     const cbData = cb ? String(cb.data || "") : null;
 
- // 3) Рейт-лимит на чат (3 сек по умолчанию)
-     if (await rateLimit(chatId, 2)) { // можно 2–3 сек
-       res.status(200).send("ok");
-       return;
-     }
+    // 4) Рейт-лимит (2–3 сек)
+    if (await rateLimit(chatId, 2)) {
+      res.status(200).send("ok");
+      return;
+    }
 
 
     // === CALLBACK-КНОПКИ ===
@@ -393,15 +393,11 @@ export default async function handler(req, res) {
     }
 
     // === VOICE ===
-  
     if (msg.voice && msg.voice.file_id) {
-      if (!voiceAllowed(msg, 60)) { // до 60 сек
-        await tgSend(chatId, "Голосовое слишком длинное (максимум 60 секунд).");
-        res.status(200).send("ok"); return;
-      }
-       await tgAction(chatId, "record_voice");
-
+      if (!voiceAllowed(msg, 60)) { /* … */ }
       await tgAction(chatId, "record_voice");
+      // дальше без изменений…
+
       const fileId = msg.voice.file_id;
       const mime   = msg.voice.mime_type || "audio/ogg";
       const st0 = await findStateRow(sheets, chatId);
