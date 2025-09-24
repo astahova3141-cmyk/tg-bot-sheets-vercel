@@ -1,9 +1,16 @@
-// api/tg.js — Telegram → Google Sheets + Voice (Deepgram), Node 18+ on Vercel
+// api/tg.js — Telegram → Google Sheets + Voice (Deepgram)
 
+// --- imports
 import { google } from "googleapis";
-import { verifyTelegramSecret, dedupeUpdate, rateLimit, sanitizeCell, voiceAllowed } from "../security.js";
+import {
+  verifyTelegramSecret,
+  dedupeUpdate,
+  rateLimit,
+  sanitizeCell,
+  voiceAllowed
+} from "../security.js";
 
-// ==== ENV
+// --- ENV
 const BOT_TOKEN        = process.env.BOT_TOKEN || "";
 const SHEET_ID         = process.env.SHEET_ID || "";
 const WORK_CHAT_ID     = process.env.WORK_CHAT_ID || "";
@@ -13,207 +20,215 @@ const TG_SECRET_TOKEN  = process.env.TG_SECRET_TOKEN || "";
 
 const TGBOT = BOT_TOKEN ? `https://api.telegram.org/bot${BOT_TOKEN}` : "";
 
-// ==== Telegram helpers
-async function tgSend(chat_id, text, reply_markup) {
+// --- антиспам/лимиты
+const LIMITS = {
+  name: 80,
+  phone: 16,
+  company: 120,
+  model: 120,
+  issue: 600,
+  delivery_deadline: 120,
+  repair_deadline: 120,
+  voiceUrlsLines: 10,
+  voiceUrlsChars: 1500,
+  voiceTextLines: 10,
+  voiceTextChars: 2000,
+  qtyMax: 1000,
+  devicesMax: 1000
+};
+const clip = (s, n) => (s && s.length > n ? s.slice(0, n) : s || "");
+function clipLines(s = "", maxLines, maxChars) {
+  const lines = String(s).split(/\r?\n/).slice(0, maxLines);
+  const joined = lines.join("\n");
+  return joined.length > maxChars ? joined.slice(0, maxChars) : joined;
+}
+
+// --- telegram helpers
+async function tgSend(chat_id, text, reply_markup){
   if (!BOT_TOKEN || !chat_id) return;
   const body = { chat_id, text };
   if (reply_markup) body.reply_markup = reply_markup;
   await fetch(`${TGBOT}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+    method: "POST", headers: { "Content-Type":"application/json" },
     body: JSON.stringify(body)
   });
 }
-async function tgPhoto(chat_id, photo, caption, reply_markup) {
+async function tgPhoto(chat_id, photo, caption, reply_markup){
   if (!BOT_TOKEN || !chat_id) return;
-  const body = { chat_id, photo, caption: caption || "" };
+  const body = { chat_id, photo, caption: caption||"" };
   if (reply_markup) body.reply_markup = reply_markup;
   await fetch(`${TGBOT}/sendPhoto`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+    method: "POST", headers: { "Content-Type":"application/json" },
     body: JSON.stringify(body)
   });
 }
-async function tgAction(chat_id, action = "typing") {
+async function tgAction(chat_id, action="typing"){
   if (!BOT_TOKEN || !chat_id) return;
   await fetch(`${TGBOT}/sendChatAction`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+    method: "POST", headers: { "Content-Type":"application/json" },
     body: JSON.stringify({ chat_id, action })
   });
 }
-
-// ==== Files / Voice
-async function tgFileLink(fileId) {
+async function tgFileLink(fileId){
   if (!BOT_TOKEN || !fileId) return null;
   const r = await fetch(`${TGBOT}/getFile?file_id=${encodeURIComponent(fileId)}`);
   const j = await r.json();
   const path = j?.result?.file_path;
   return path ? `https://api.telegram.org/file/bot${BOT_TOKEN}/${path}` : null;
 }
-async function transcribeVoiceFromTelegram(fileId, mime = "audio/ogg", lang = "ru") {
+async function transcribeVoiceFromTelegram(fileId, mime="audio/ogg", lang="ru"){
   if (!DEEPGRAM_API_KEY || !fileId) return null;
-
-  // 1) file_path
   const r1 = await fetch(`${TGBOT}/getFile?file_id=${encodeURIComponent(fileId)}`);
   const j1 = await r1.json();
   const path = j1?.result?.file_path;
   if (!path) return null;
-
-  // 2) bytes from TG
-  const tgFileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${path}`;
-  const r2 = await fetch(tgFileUrl);
+  const r2 = await fetch(`https://api.telegram.org/file/bot${BOT_TOKEN}/${path}`);
   if (!r2.ok) return null;
   const buf = await r2.arrayBuffer();
-
-  // 3) Deepgram
-  const url = `https://api.deepgram.com/v1/listen?language=${encodeURIComponent(lang)}&smart_format=true&punctuate=true`;
-  const resp = await fetch(url, {
+  const resp = await fetch(`https://api.deepgram.com/v1/listen?language=${encodeURIComponent(lang)}&smart_format=true&punctuate=true`, {
     method: "POST",
-    headers: {
-      "Authorization": `Token ${DEEPGRAM_API_KEY}`,
-      "Content-Type": mime || "application/octet-stream"
-    },
+    headers: { Authorization:`Token ${DEEPGRAM_API_KEY}`, "Content-Type": mime || "application/octet-stream" },
     body: Buffer.from(buf)
   });
-
   if (!resp.ok) return null;
   const data = await resp.json().catch(()=>null);
   const text = data?.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
   return text.trim() || null;
 }
 
-// ==== Google Sheets
-async function getSheets() {
+// --- Google Sheets
+async function getSheets(){
   const client_email = process.env.GCP_CLIENT_EMAIL || "";
-  const private_key  = (process.env.GCP_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+  const private_key  = (process.env.GCP_PRIVATE_KEY || "").replace(/\\n/g,"\n");
   const auth = new google.auth.JWT(client_email, null, private_key, [
     "https://www.googleapis.com/auth/spreadsheets"
   ]);
-  return google.sheets({ version: "v4", auth });
+  return google.sheets({ version:"v4", auth });
 }
-async function ensureHeaders(sheets) {
+async function readAll(sheets, range){
+  const resp = await sheets.spreadsheets.values.get({ spreadsheetId:SHEET_ID, range });
+  return resp.data.values || [];
+}
+async function appendRow(sheets, sheet, row){
+  await sheets.spreadsheets.values.append({
+    spreadsheetId:SHEET_ID, range:`${sheet}!A1`, valueInputOption:"RAW",
+    requestBody:{ values:[row] }
+  });
+}
+async function updateCell(sheets, sheet, row, colLetter, value){
+  await sheets.spreadsheets.values.update({
+    spreadsheetId:SHEET_ID, range:`${sheet}!${colLetter}${row}`, valueInputOption:"RAW",
+    requestBody:{ values:[[value]] }
+  });
+}
+function colLetterFromIndex(idx){ return String.fromCharCode(65 + idx); }
+
+// (+) новый лист Logs и новое поле priority в Requests
+async function ensureHeaders(sheets){
   const need = {
     DialogState: [
       "chat_id","step","name","phone","company",
       "service_type","model","issue","qty","devices_count",
       "delivery_deadline","repair_deadline","self_delivery",
-      "voice_urls","voice_texts",
-      "updated_at"
+      "voice_urls","voice_texts","updated_at"
     ],
     Requests: [
       "date","name","phone","company",
       "service_type","model","issue","qty","devices_count",
       "delivery_deadline","repair_deadline","self_delivery",
-      "voice_urls","voice_texts",
+      "voice_urls","voice_texts","priority",  // <— NEW
       "chat_id","ticket_id","status","yougile_link","notified","closed_at"
-    ]
+    ],
+    Logs: [ "ts","level","chat_id","message","extra" ] // <— NEW
   };
 
-  const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
-  const titles = (meta.data.sheets || []).map(s => s.properties.title);
+  const meta = await sheets.spreadsheets.get({ spreadsheetId:SHEET_ID });
+  const titles = (meta.data.sheets||[]).map(s=>s.properties.title);
 
-  for (const [name, headers] of Object.entries(need)) {
-    if (!titles.includes(name)) {
+  for (const [name, headers] of Object.entries(need)){
+    if (!titles.includes(name)){
       await sheets.spreadsheets.batchUpdate({
-        spreadsheetId: SHEET_ID,
-        requestBody: { requests: [{ addSheet: { properties: { title: name } } }] }
+        spreadsheetId:SHEET_ID,
+        requestBody:{ requests:[{ addSheet:{ properties:{ title:name } } }] }
       });
       await sheets.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID,
-        range: `${name}!A1:${String.fromCharCode(64 + headers.length)}1`,
-        valueInputOption: "RAW",
-        requestBody: { values: [headers] }
+        spreadsheetId:SHEET_ID,
+        range:`${name}!A1:${String.fromCharCode(64 + headers.length)}1`,
+        valueInputOption:"RAW",
+        requestBody:{ values:[headers] }
       });
     } else {
-      const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${name}!1:1` });
+      const resp = await sheets.spreadsheets.values.get({ spreadsheetId:SHEET_ID, range:`${name}!1:1` });
       const row = resp.data.values?.[0] || [];
-      if (row.length === 0) {
+      if (row.length === 0){
         await sheets.spreadsheets.values.update({
-          spreadsheetId: SHEET_ID,
-          range: `${name}!A1:${String.fromCharCode(64 + headers.length)}1`,
-          valueInputOption: "RAW",
-          requestBody: { values: [headers] }
+          spreadsheetId:SHEET_ID,
+          range:`${name}!A1:${String.fromCharCode(64 + headers.length)}1`,
+          valueInputOption:"RAW",
+          requestBody:{ values:[headers] }
         });
       }
     }
   }
 }
-async function readAll(sheets, range) {
-  const resp = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range });
-  return resp.data.values || [];
-}
-async function appendRow(sheets, sheet, row) {
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SHEET_ID,
-    range: `${sheet}!A1`,
-    valueInputOption: "RAW",
-    requestBody: { values: [row] }
-  });
-}
-async function updateCell(sheets, sheet, row, colLetter, value) {
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SHEET_ID,
-    range: `${sheet}!${colLetter}${row}`,
-    valueInputOption: "RAW",
-    requestBody: { values: [[value]] }
-  });
-}
-function colLetterFromIndex(idx) { return String.fromCharCode(65 + idx); }
 
-// ==== UI (кнопки с эмодзи)
-const SERVICE_OPTIONS = [
-  { btn: "🛒 Заказ картриджей",        key: "Заказ картриджей" },
-  { btn: "🛠 Ремонт оргтехники",       key: "Ремонт оргтехники" },
-  { btn: "🔄 Заправка картриджей",     key: "Заправка картриджей" },
-  { btn: "🧑‍🔧 Вызвать мастера в офис", key: "Вызвать мастера в офис" }
-];
+// (+) логгер
+async function logEvent(sheets, level="info", chatId="", message="", extra=null){
+  try{
+    const payload = extra ? JSON.stringify(extra) : "";
+    await appendRow(sheets, "Logs", [
+      new Date().toISOString(),
+      level,
+      String(chatId||""),
+      clip(sanitizeCell(String(message||"")), 300),
+      clip(sanitizeCell(payload), 1000)
+    ]);
+  } catch(_){}
+}
 
+// --- UI и клавиатуры
 const PROMPT = {
-  name:    "Как вас зовут? (Фамилия не обязательна) ✍️",
-  phone:   "Укажите телефон (формат +7XXXXXXXXXX или 8XXXXXXXXXX) 📱",
-  company: "Как называется компания? 🏢",
-  service: "Что необходимо сделать? Выберите ниже ⤵️",
-  model:   "Укажите модель устройства / картриджа (например: HP LaserJet Pro M404 / CF259A) 🧾",
-  issue:   "Кратко опишите проблему (1–2 предложения) 🛠️",
-  qty:               "Сколько штук? (только число) 🔢",
-  devices_count:     "Сколько единиц техники? (только число) 🔢",
-  delivery_deadline: "Когда нужна доставка? (например: сегодня/завтра/дата) 🚚",
-  repair_deadline:   "К какому сроку нужен ремонт? (например: завтра/1–2 дня/дата) 🗓️",
-  self_delivery:     "Для ускорения обработки вашей заявки вы можете самостоятельно доставить технику по адресу: г. Дубна, проспект Боголюбова, 15, офис 39.\nЕсть ли возможность доставить самостоятельно? ⤵️"
+  name:"Как вас зовут? (Фамилия не обязательна) ✍️",
+  phone:"Укажите телефон (формат +7XXXXXXXXXX или 8XXXXXXXXXX) 📱",
+  company:"Как называется компания? 🏢",
+  service:"Что необходимо сделать? Выберите ниже ⤵️",
+  model:"Укажите модель устройства / картриджа (например: HP LaserJet Pro M404 / CF259A) 🧾",
+  issue:"Кратко опишите проблему (1–2 предложения) 🛠️",
+  qty:"Сколько штук? (только число) 🔢",
+  devices_count:"Сколько единиц техники? (только число) 🔢",
+  delivery_deadline:"Когда нужна доставка? (например: сегодня/завтра/дата) 🚚",
+  repair_deadline:"К какому сроку нужен ремонт? (например: завтра/1–2 дня/дата) 🗓️",
+  self_delivery:"Для ускорения обработки вашей заявки вы можете самостоятельно доставить технику по адресу: г. Дубна, проспект Боголюбова, 15, офис 39.\nЕсть ли возможность доставить самостоятельно? ⤵️"
 };
+// кнопки сервиса (с эмодзи)
+const SERVICE_OPTIONS = [
+  { btn:"🛒 Заказ картриджей", key:"Заказ картриджей" },
+  { btn:"🛠 Ремонт оргтехники", key:"Ремонт оргтехники" },
+  { btn:"🔄 Заправка картриджей", key:"Заправка картриджей" },
+  { btn:"🧑‍🔧 Вызвать мастера в офис", key:"Вызвать мастера в офис" }
+];
+const START_KBD   = { keyboard:[[ {text:"▶️ Старт"},{text:"❌ Отмена"} ]], resize_keyboard:true };
+const SERVICE_KBD = { keyboard:[ [ {text:SERVICE_OPTIONS[0].btn},{text:SERVICE_OPTIONS[1].btn} ],
+                                  [ {text:SERVICE_OPTIONS[2].btn},{text:SERVICE_OPTIONS[3].btn} ] ],
+                      resize_keyboard:true, one_time_keyboard:true };
+const YESNO_KBD   = { keyboard:[[ {text:"Да"},{text:"Нет"} ]], resize_keyboard:true, one_time_keyboard:true };
+const KBD_MAIN    = { keyboard:[[ {text:"❌ Отмена /stop"} ]], resize_keyboard:true };
+const YESNO_INLINE= { inline_keyboard:[[ {text:"✅ Подтвердить",callback_data:"CONFIRM"} ],
+                                      [ {text:"✏️ Исправить…", callback_data:"EDIT_MENU"} ]] };
+const EDIT_INLINE = { inline_keyboard:[
+  [ {text:"👤 Имя",callback_data:"EDIT:name"},{text:"📱 Телефон",callback_data:"EDIT:phone"} ],
+  [ {text:"🏢 Компания",callback_data:"EDIT:company"},{text:"🧭 Услуга",callback_data:"EDIT:service"} ],
+  [ {text:"🧾 Модель",callback_data:"EDIT:model"},{text:"🛠 Проблема",callback_data:"EDIT:issue"} ],
+  [ {text:"🔢 Кол-во",callback_data:"EDIT:qty"},{text:"🖨 Техники",callback_data:"EDIT:devices_count"} ],
+  [ {text:"🚚 Срок дост.",callback_data:"EDIT:delivery_deadline"},{text:"🗓️ Срок ремонта",callback_data:"EDIT:repair_deadline"} ],
+  [ {text:"📦 Самодоставка",callback_data:"EDIT:self_delivery"} ],
+  [ {text:"⬅️ Назад",callback_data:"BACK"} ]
+]};
 
-const START_KBD = { keyboard: [[{ text: "▶️ Старт" }, { text: "❌ Отмена" }]], resize_keyboard: true };
-const SERVICE_KBD = {
-  keyboard: [
-    [{ text: SERVICE_OPTIONS[0].btn }, { text: SERVICE_OPTIONS[1].btn }],
-    [{ text: SERVICE_OPTIONS[2].btn }, { text: SERVICE_OPTIONS[3].btn }]
-  ],
-  resize_keyboard: true, one_time_keyboard: true
-};
-const YESNO_KBD  = { keyboard: [[{ text: "Да" }, { text: "Нет" }]], resize_keyboard: true, one_time_keyboard: true };
-const KBD_MAIN   = { keyboard: [[{ text: "❌ Отмена /stop" }]], resize_keyboard: true };
-
-const YESNO_INLINE = { inline_keyboard: [[{text:"✅ Подтвердить", callback_data:"CONFIRM"}],[{text:"✏️ Исправить…", callback_data:"EDIT_MENU"}]] };
-const EDIT_INLINE  = {
-  inline_keyboard: [
-    [{text:"👤 Имя", callback_data:"EDIT:name"}, {text:"📱 Телефон", callback_data:"EDIT:phone"}],
-    [{text:"🏢 Компания", callback_data:"EDIT:company"}, {text:"🧭 Услуга", callback_data:"EDIT:service"}],
-    [{text:"🧾 Модель", callback_data:"EDIT:model"}, {text:"🛠 Проблема", callback_data:"EDIT:issue"}],
-    [{text:"🔢 Кол-во", callback_data:"EDIT:qty"}, {text:"🖨 Техники", callback_data:"EDIT:devices_count"}],
-    [{text:"🚚 Срок дост.", callback_data:"EDIT:delivery_deadline"}, {text:"🗓️ Срок ремонта", callback_data:"EDIT:repair_deadline"}],
-    [{text:"📦 Самодоставка", callback_data:"EDIT:self_delivery"}],
-    [{text:"⬅️ Назад", callback_data:"BACK"}]
-  ]
-};
-
-function makeSummary(state, idx) {
-  const lines = [];
-  lines.push("Проверьте заявку:\n");
-  const add = (label, value) => {
-    const v = (value || "").toString().trim();
-    if (v) lines.push(`${label} ${v}`);
-  };
+// сводка (только заполненные)
+function makeSummary(state, idx){
+  const lines = ["Проверьте заявку:\n"];
+  const add = (label, v) => { const s = (v||"").toString().trim(); if (s) lines.push(`${label} ${s}`); };
   add("👤 Имя:", state[idx.name]);
   add("📱 Тел:", state[idx.phone]);
   add("🏢 Компания:", state[idx.company]);
@@ -231,53 +246,54 @@ function makeSummary(state, idx) {
   return lines.join("\n");
 }
 
-// ==== Dialog state
-async function findStateRow(sheets, chatId) {
+// --- dialog state
+async function findStateRow(sheets, chatId){
   const rows = await readAll(sheets, "DialogState!A:Z");
   const head = rows[0] || [];
-  const idx = {}; head.forEach((h,i)=> idx[h]=i);
-  for (let r=1; r<rows.length; r++) {
-    if (String(rows[r][idx["chat_id"]||0]) === String(chatId)) {
-      return { rowNum: r+1, data: rows[r], idx, head };
+  const idx  = {}; head.forEach((h,i)=> idx[h]=i);
+  for (let r=1; r<rows.length; r++){
+    if (String(rows[r][idx["chat_id"]||0]) === String(chatId)){
+      return { rowNum:r+1, data:rows[r], idx, head };
     }
   }
-  // добавляем строку с корректным количеством колонок
   await appendRow(sheets, "DialogState", [
-    String(chatId), "ask_name", "", "", "",      // chat_id, step, name, phone, company
-    "", "", "", "", "",                          // service_type, model, issue, qty, devices_count
-    "", "", "",                                  // delivery_deadline, repair_deadline, self_delivery
-    "", "",                                      // voice_urls, voice_texts
-    new Date().toISOString()                     // updated_at
+    String(chatId),"ask_name","","","", // chat_id,step,name,phone,company
+    "","","","","",                    // service_type,model,issue,qty,devices_count
+    "","","",                          // delivery_deadline,repair_deadline,self_delivery
+    "","",                             // voice_urls, voice_texts
+    new Date().toISOString()
   ]);
   const fresh = await readAll(sheets, "DialogState!A:Z");
-  return { rowNum: fresh.length, data: fresh[fresh.length-1], idx, head };
+  return { rowNum:fresh.length, data:fresh[fresh.length-1], idx, head };
 }
-async function setField(sheets, rowNum, head, field, value) {
-  const colIdx = head.indexOf(field); if (colIdx<0) return;
+async function setField(sheets, rowNum, head, field, value){
+  const colIdx = head.indexOf(field); if (colIdx < 0) return;
   const colLetter = colLetterFromIndex(colIdx);
   await updateCell(sheets, "DialogState", rowNum, colLetter, value);
   const updIdx = head.indexOf("updated_at");
-  if (updIdx >= 0) {
-    const updCol = colLetterFromIndex(updIdx);
-    await updateCell(sheets, "DialogState", rowNum, updCol, new Date().toISOString());
+  if (updIdx >= 0){
+    await updateCell(sheets, "DialogState", rowNum, colLetterFromIndex(updIdx), new Date().toISOString());
   }
 }
 
-// ==== Handler
-export default async function handler(req, res) {
-  if (req.method !== "POST") { res.status(200).send("ok"); return; }
+// (+) определяем приоритет
+function derivePriority(row, idx){
+  const blob = [
+    row[idx.delivery_deadline]||"",
+    row[idx.repair_deadline]||"",
+    row[idx.issue]||""
+  ].join(" ").toLowerCase();
+  return /(сегодня|срочн|asap|немедлен|как можно скорее)/.test(blob) ? "high" : "";
+}
 
-  try {
-    // 1) Проверка секрета Telegram
-    if (!verifyTelegramSecret(req, TG_SECRET_TOKEN)) {
-      res.status(200).send("ok"); return;
-    }
+// --- Handler
+export default async function handler(req, res){
+  if (req.method !== "POST"){ res.status(200).send("ok"); return; }
 
-    // 2) Дедуп по update_id
-    const prelimUpdate = req.body || {};
-    if (await dedupeUpdate(prelimUpdate.update_id)) {
-      res.status(200).send("ok"); return;
-    }
+  try{
+    if (!verifyTelegramSecret(req, TG_SECRET_TOKEN)) { res.status(200).send("ok"); return; }
+    const prelim = req.body || {};
+    if (await dedupeUpdate(prelim.update_id)) { res.status(200).send("ok"); return; }
 
     const sheets = await getSheets();
     await ensureHeaders(sheets);
@@ -289,18 +305,17 @@ export default async function handler(req, res) {
     const text   = (msg.text || "").trim();
     const cbData = cb ? String(cb.data || "") : null;
 
-    // 3) Рейт-лимит по чату
-    if (await rateLimit(chatId, 2)) {
-      res.status(200).send("ok"); return;
-    }
+    if (await rateLimit(chatId, 2)) { res.status(200).send("ok"); return; }
 
-    // === CALLBACK-КНОПКИ ===
-    if (cb) {
-      const st = await findStateRow(sheets, chatId);
+    // --- inline кнопки
+    if (cb){
+      const st   = await findStateRow(sheets, chatId);
       const head = st.head, idx = st.idx;
 
-      if (cbData === "CONFIRM") {
+      if (cbData === "CONFIRM"){
         const row = st.data;
+        const priority = derivePriority(row, idx);
+
         await appendRow(sheets, "Requests", [
           new Date().toISOString(),
           sanitizeCell(row[idx.name]||""), sanitizeCell(row[idx.phone]||""), sanitizeCell(row[idx.company]||""),
@@ -308,16 +323,13 @@ export default async function handler(req, res) {
           sanitizeCell(row[idx.qty]||""), sanitizeCell(row[idx.devices_count]||""),
           sanitizeCell(row[idx.delivery_deadline]||""), sanitizeCell(row[idx.repair_deadline]||""), sanitizeCell(row[idx.self_delivery]||""),
           sanitizeCell(row[idx.voice_urls]||""), sanitizeCell(row[idx.voice_texts]||""),
+          priority,
           String(chatId), "", "new", "", "no", ""
         ]);
 
-        if (WORK_CHAT_ID) {
-          const card = [];
-          const add = (label, value) => {
-            const v = (value || "").toString().trim();
-            if (v) card.push(`${label} ${v}`);
-          };
-          card.push("Новая заявка");
+        if (WORK_CHAT_ID){
+          const card = ["Новая заявка"];
+          const add = (label, v) => { const s = (v||"").toString().trim(); if (s) card.push(`${label} ${s}`); };
           add("👤", row[idx.name]);
           add("📱", row[idx.phone]);
           add("🏢", row[idx.company]);
@@ -329,147 +341,137 @@ export default async function handler(req, res) {
           add("🚚", row[idx.delivery_deadline]);
           add("🗓️", row[idx.repair_deadline]);
           add("📦", row[idx.self_delivery]);
-          if ((row[idx.voice_urls] || "").toString().trim())  card.push(`🎧 ${row[idx.voice_urls]}`);
-          if ((row[idx.voice_texts] || "").toString().trim()) card.push(`🗒 ${row[idx.voice_texts]}`);
+          if (priority === "high") card.push("🔥 Приоритет: срочно");
+          if ((row[idx.voice_urls]||"").toString().trim())  card.push(`🎧 ${row[idx.voice_urls]}`);
+          if ((row[idx.voice_texts]||"").toString().trim()) card.push(`🗒 ${row[idx.voice_texts]}`);
           await tgSend(WORK_CHAT_ID, card.join("\n"));
         }
 
         await setField(sheets, st.rowNum, head, "step", "done");
+        await logEvent(sheets, "info", chatId, "request_confirmed", { chatId });
         await tgSend(chatId, "Спасибо! Заявка принята. Менеджер свяжется с вами в ближайшее время. 🙌");
         res.status(200).send("ok"); return;
       }
 
-      if (cbData === "EDIT_MENU") {
-        await tgSend(chatId, "🧭 Услуга?", EDIT_INLINE);
-        res.status(200).send("ok"); return;
-      }
-
-      if (cbData === "BACK") {
+      if (cbData === "EDIT_MENU"){ await tgSend(chatId, "🧭 Услуга?", EDIT_INLINE); res.status(200).send("ok"); return; }
+      if (cbData === "BACK"){
         await setField(sheets, st.rowNum, head, "step", "confirm");
         const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
         await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
-        res.status(200).send("ok"); return;
+        res.status(200).send("ок"); return;
       }
-
-      if (cbData && cbData.startsWith("EDIT:")) {
-        const field = cbData.split(":")[1]; // name/phone/company/service/...
-        await setField(sheets, st.rowNum, head, "step", "edit_"+field);
+      if (cbData && cbData.startsWith("EDIT:")){
+        const field = cbData.split(":")[1];
         let kbd = KBD_MAIN;
         if (field === "service") kbd = SERVICE_KBD;
         if (field === "self_delivery") kbd = YESNO_KBD;
+        await setField(sheets, st.rowNum, head, "step", "edit_"+field);
         await tgSend(chatId, PROMPT[field] || "Введите значение:", kbd);
         res.status(200).send("ok"); return;
       }
-
       res.status(200).send("ok"); return;
     }
 
-    // === VOICE ===
-    if (msg.voice && msg.voice.file_id) {
-      if (!voiceAllowed(msg, 60)) { // до 60 сек
-        await tgSend(chatId, "Голосовое слишком длинное (максимум 60 секунд).");
-        res.status(200).send("ok"); return;
-      }
+    // --- voice
+    if (msg.voice?.file_id){
+      if (!voiceAllowed(msg, 60)) { await tgSend(chatId, "Голосовое слишком длинное (максимум 60 секунд)."); res.status(200).send("ok"); return; }
       await tgAction(chatId, "record_voice");
 
-      const fileId = msg.voice.file_id;
-      const mime   = msg.voice.mime_type || "audio/ogg";
-      const st0 = await findStateRow(sheets, chatId);
+      const st0   = await findStateRow(sheets, chatId);
       const head0 = st0.head, idx0 = st0.idx;
 
-      const link = await tgFileLink(fileId);
+      const link = await tgFileLink(msg.voice.file_id);
       let transcript = null;
-      try { transcript = await transcribeVoiceFromTelegram(fileId, mime, "ru"); } catch (_) {}
+      try { transcript = await transcribeVoiceFromTelegram(msg.voice.file_id, msg.voice.mime_type || "audio/ogg", "ru"); } catch(_){}
 
-      const prevUrls  = (st0.data[idx0.voice_urls]  || "").trim();
-      const prevTexts = (st0.data[idx0.voice_texts] || "").trim();
-      const newUrls   = link ? (prevUrls ? prevUrls + "\n" + link : link) : prevUrls;
-      const newTexts  = transcript ? (prevTexts ? prevTexts + "\n" + transcript : transcript) : prevTexts;
+      const prevUrls  = (st0.data[idx0.voice_urls]  || "");
+      const prevTexts = (st0.data[idx0.voice_texts] || "");
 
-      if (newUrls !== prevUrls)   await setField(sheets, st0.rowNum, head0, "voice_urls",  sanitizeCell(newUrls));
-      if (newTexts !== prevTexts) await setField(sheets, st0.rowNum, head0, "voice_texts", sanitizeCell(newTexts));
+      const newUrls  = link ? (prevUrls ? prevUrls + "\n" + link : link) : prevUrls;
+      const newTexts = transcript ? (prevTexts ? prevTexts + "\n" + transcript : transcript) : prevTexts;
 
-      await tgSend(
-        chatId,
-        transcript
-          ? "🎙 Голосовое прикрепил к заявке.\n🗒 Текст распознан и сохранён."
-          : "🎙 Голосовое прикрепил к заявке. Распознать не удалось, но ссылка сохранена."
-      );
+      const safeUrls  = clipLines(newUrls,  LIMITS.voiceUrlsLines,  LIMITS.voiceUrlsChars);
+      const safeTexts = clipLines(newTexts, LIMITS.voiceTextLines, LIMITS.voiceTextChars);
+
+      if (safeUrls  !== prevUrls)  await setField(sheets, st0.rowNum, head0, "voice_urls",  sanitizeCell(safeUrls));
+      if (safeTexts !== prevTexts) await setField(sheets, st0.rowNum, head0, "voice_texts", sanitizeCell(safeTexts));
+
+      await logEvent(sheets, "info", chatId, "voice_saved", { hasText: !!transcript });
+      await tgSend(chatId, transcript ? "🎙 Голосовое прикрепил к заявке.\n🗒 Текст распознан и сохранён." :
+                                        "🎙 Голосовое прикрепил к заявке. Распознать не удалось, но ссылка сохранена.");
     }
 
-    // === Команды ===
-    if (text === "/ping") { await tgSend(chatId, "ALIVE ✅"); res.status(200).send("ok"); return; }
-    if (text === "/help") { await tgSend(chatId, "Команды:\n/start — начать заново\n/stop — отменить\n/id — ваш Chat ID\n/help — помощь"); res.status(200).send("ok"); return; }
-    if (text === "/id")   { await tgSend(chatId, "Chat ID: " + chatId); res.status(200).send("ok"); return; }
-
-    if (text === "/stop" || text === "❌ Отмена") {
+    // --- команды
+    if (text === "/ping"){ await tgSend(chatId, "ALIVE ✅"); res.status(200).send("ok"); return; }
+    if (text === "/help"){ await tgSend(chatId, "Команды:\n/start — начать заново\n/stop — отменить\n/id — ваш Chat ID\n/help — помощь"); res.status(200).send("ok"); return; }
+    if (text === "/id"){   await tgSend(chatId, "Chat ID: " + chatId); res.status(200).send("ok"); return; }
+    if (text === "/stop" || text === "❌ Отмена"){
       const st = await findStateRow(sheets, chatId);
       await setField(sheets, st.rowNum, st.head, "step", "stopped");
+      await logEvent(sheets, "info", chatId, "stopped");
       await tgSend(chatId, "Ок, остановил. Чтобы начать заново — /start", START_KBD);
       res.status(200).send("ok"); return;
     }
-
-    if (text === "/start") {
+    if (text === "/start"){
       const st = await findStateRow(sheets, chatId);
-      for (const f of [
-        "name","phone","company","service_type","model","issue",
-        "qty","devices_count","delivery_deadline","repair_deadline",
-        "self_delivery","voice_urls","voice_texts"
-      ]) {
+      for (const f of ["name","phone","company","service_type","model","issue","qty","devices_count","delivery_deadline","repair_deadline","self_delivery","voice_urls","voice_texts"]){
         await setField(sheets, st.rowNum, st.head, f, "");
       }
       await setField(sheets, st.rowNum, st.head, "step", "wait_start");
       const about = "Здравствуйте! Я бот приёма заявок по обслуживанию оргтехники.\nНажмите «Старт», чтобы начать, либо «Отмена».";
       if (BOT_BANNER_URL) await tgPhoto(chatId, BOT_BANNER_URL, about, START_KBD);
       else await tgSend(chatId, about, START_KBD);
+      await logEvent(sheets, "info", chatId, "session_start");
       res.status(200).send("ok"); return;
     }
-
-    if (text === "▶️ Старт") {
+    if (text === "▶️ Старт"){
       const st = await findStateRow(sheets, chatId);
       await setField(sheets, st.rowNum, st.head, "step", "ask_name");
       await tgSend(chatId, PROMPT.name);
       res.status(200).send("ok"); return;
     }
 
-    // === Диалог ===
-    const st = await findStateRow(sheets, chatId);
+    // --- диалог
+    const st   = await findStateRow(sheets, chatId);
     const head = st.head, idx = st.idx;
     const step = st.data[idx["step"]] || "ask_name";
 
-    // Режим правки одного поля
-    if (String(step).startsWith("edit_")) {
+    // edit_*
+    if (String(step).startsWith("edit_")){
       const field = String(step).slice(5);
-      const rawVal = (text || "").trim();
-      if (!rawVal) { await tgSend(chatId, "Введите значение."); res.status(200).send("ok"); return; }
+      let val = (text || "").trim();
+      if (!val){ await tgSend(chatId, "Введите значение."); res.status(200).send("ok"); return; }
 
-      let targetField = field;
-      let val = rawVal;
-
-      if (field === "phone") {
+      // нормализация + лимиты
+      if (field === "phone"){
         const s = val.replace(/\D+/g, "");
         const norm = (s.length===11 && (s[0]==="7"||s[0]==="8")) ? "+7"+s.slice(1) : (s.length===10 ? "+7"+s : null);
-        if (!norm) { await tgSend(chatId, "Телефон не распознан. Формат: +7XXXXXXXXXX или 8XXXXXXXXXX."); res.status(200).send("ok"); return; }
+        if (!norm){ await tgSend(chatId, "Телефон не распознан. Формат: +7XXXXXXXXXX или 8XXXXXXXXXX."); res.status(200).send("ok"); return; }
         val = norm;
       }
-      if (field === "service") targetField = "service_type";
-      if (field === "self_delivery") {
-        const v = val.toLowerCase(); val = v.includes("да") ? "Да" : v.includes("нет") ? "Нет" : val;
-      }
-      if (field === "qty" || field === "devices_count") {
-        const n = parseInt(val, 10); if (!(n>0)) { await tgSend(chatId, "Введите положительное число."); res.status(200).send("ok"); return; }
-        val = String(n);
+      if (field === "service"){ await setField(sheets, st.rowNum, head, "service_type", sanitizeCell(val)); }
+      else if (field === "self_delivery"){
+        const v = val.toLowerCase(); await setField(sheets, st.rowNum, head, "self_delivery", sanitizeCell(v.includes("да") ? "Да" : v.includes("нет") ? "Нет" : val));
+      } else if (field === "qty" || field === "devices_count"){
+        const n = parseInt(val, 10);
+        if (!(n>0)){ await tgSend(chatId, "Введите положительное число."); res.status(200).send("ok"); return; }
+        const max = field === "qty" ? LIMITS.qtyMax : LIMITS.devicesMax;
+        await setField(sheets, st.rowNum, head, field, String(Math.min(n, max)));
+      } else {
+        const maxMap = { name:LIMITS.name, company:LIMITS.company, model:LIMITS.model, issue:LIMITS.issue,
+                         delivery_deadline:LIMITS.delivery_deadline, repair_deadline:LIMITS.repair_deadline };
+        const capped = maxMap[field] ? clip(val, maxMap[field]) : val;
+        await setField(sheets, st.rowNum, head, field, sanitizeCell(capped));
       }
 
-      await setField(sheets, st.rowNum, head, targetField, sanitizeCell(val));
       await setField(sheets, st.rowNum, head, "step", "confirm");
       const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
       await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
       res.status(200).send("ok"); return;
     }
 
-    // Вспомогательный задаватель вопроса
-    async function ask(field) {
+    // ask helper
+    async function ask(field){
       let kbd = KBD_MAIN;
       if (field === "service") kbd = SERVICE_KBD;
       else if (field === "self_delivery") kbd = YESNO_KBD;
@@ -478,107 +480,103 @@ export default async function handler(req, res) {
       await setField(sheets, st.rowNum, head, "step", "ask_"+field);
     }
 
-    // Шаги
-    if (step === "ask_name") {
-      if (!text) { await tgSend(chatId, "Введите имя."); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "name", sanitizeCell(text));
+    // steps
+    if (step === "ask_name"){
+      if (!text){ await tgSend(chatId, "Введите имя."); res.status(200).send("ok"); return; }
+      await setField(sheets, st.rowNum, head, "name", sanitizeCell(clip(text, LIMITS.name)));
       await ask("phone"); res.status(200).send("ok"); return;
     }
-    if (step === "ask_phone") {
-      const s = String(text||"").replace(/\D+/g, "");
+    if (step === "ask_phone"){
+      const s = String(text||"").replace(/\D+/g,"");
       const norm = (s.length===11 && (s[0]==="7"||s[0]==="8")) ? "+7"+s.slice(1) : (s.length===10 ? "+7"+s : null);
-      if (!norm) { await tgSend(chatId, "Телефон не распознан. Формат: +7XXXXXXXXXX или 8XXXXXXXXXX."); res.status(200).send("ok"); return; }
+      if (!norm){ await tgSend(chatId, "Телефон не распознан. Формат: +7XXXXXXXXXX или 8XXXXXXXXXX."); res.status(200).send("ok"); return; }
       await setField(sheets, st.rowNum, head, "phone", sanitizeCell(norm));
       await ask("company"); res.status(200).send("ok"); return;
     }
-    if (step === "ask_company") {
-      if (!text) { await tgSend(chatId, "Укажите название компании."); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "company", sanitizeCell(text));
+    if (step === "ask_company"){
+      if (!text){ await tgSend(chatId, "Укажите название компании."); res.status(200).send("ok"); return; }
+      await setField(sheets, st.rowNum, head, "company", sanitizeCell(clip(text, LIMITS.company)));
       await ask("service"); res.status(200).send("ok"); return;
     }
-    if (step === "ask_service") {
+    if (step === "ask_service"){
       const v = (text || "").trim();
-      const opt = SERVICE_OPTIONS.find(o => v.includes(o.key)); // эмодзи не мешают
-      if (!opt) { await tgSend(chatId, "Выберите вариант на клавиатуре.", SERVICE_KBD); res.status(200).send("ok"); return; }
+      const opt = SERVICE_OPTIONS.find(o => v.includes(o.key));
+      if (!opt){ await tgSend(chatId, "Выберите вариант на клавиатуре.", SERVICE_KBD); res.status(200).send("ok"); return; }
       await setField(sheets, st.rowNum, head, "service_type", sanitizeCell(opt.key));
-      if (opt.key === "Вызвать мастера в офис") await ask("issue");
-      else await ask("model");
+      await ask(opt.key === "Вызвать мастера в офис" ? "issue" : "model");
       res.status(200).send("ok"); return;
     }
-    if (step === "ask_model") {
-      if (!text) { await tgSend(chatId, "Укажите модель устройства/картриджа."); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "model", sanitizeCell(text));
-      const service = st.data[idx["service_type"]];
-      if (service === "Заказ картриджей") await ask("qty");
-      else if (service === "Заправка картриджей") await ask("qty");
-      else await ask("issue");
+    if (step === "ask_model"){
+      if (!text){ await tgSend(chatId, "Укажите модель устройства/картриджа."); res.status(200).send("ok"); return; }
+      await setField(sheets, st.rowNum, head, "model", sanitizeCell(clip(text, LIMITS.model)));
+      const sType = st.data[idx["service_type"]];
+      await ask(sType === "Ремонт оргтехники" ? "issue" : "qty");
+      if (sType === "Вызвать мастера в офис") await ask("issue");
       res.status(200).send("ok"); return;
     }
-    if (step === "ask_qty") {
+    if (step === "ask_qty"){
       const n = parseInt(String(text||"").trim(), 10);
-      if (!(n > 0)) { await tgSend(chatId, "Введите положительное число."); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "qty", sanitizeCell(String(n)));
-      const service = st.data[idx["service_type"]];
-      if (service === "Заказ картриджей") await ask("delivery_deadline");
-      else if (service === "Заправка картриджей") await ask("self_delivery");
+      if (!(n>0)){ await tgSend(chatId, "Введите положительное число."); res.status(200).send("ok"); return; }
+      await setField(sheets, st.rowNum, head, "qty", String(Math.min(n, LIMITS.qtyMax)));
+      const sType = st.data[idx["service_type"]];
+      if (sType === "Заказ картриджей") await ask("delivery_deadline");
+      else if (sType === "Заправка картриджей") await ask("self_delivery");
       else await ask("issue");
       res.status(200).send("ok"); return;
     }
-    if (step === "ask_issue") {
-      if (!text) { await tgSend(chatId, "Опишите проблему в 1–2 предложениях."); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "issue", sanitizeCell(text));
-      const service = st.data[idx["service_type"]];
-      if (service === "Ремонт оргтехники") {
-        await ask("devices_count");
-      } else if (service === "Вызвать мастера в офис") {
+    if (step === "ask_issue"){
+      if (!text){ await tgSend(chatId, "Опишите проблему в 1–2 предложениях."); res.status(200).send("ok"); return; }
+      await setField(sheets, st.rowNum, head, "issue", sanitizeCell(clip(text, LIMITS.issue)));
+      const sType = st.data[idx["service_type"]];
+      if (sType === "Ремонт оргтехники") await ask("devices_count");
+      else if (sType === "Вызвать мастера в офис"){
         await setField(sheets, st.rowNum, head, "step", "confirm");
         const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
         await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
       }
       res.status(200).send("ok"); return;
     }
-    if (step === "ask_devices_count") {
+    if (step === "ask_devices_count"){
       const n = parseInt(String(text||"").trim(), 10);
-      if (!(n > 0)) { await tgSend(chatId, "Введите положительное число."); res.status(200).send("ok"); return; }
-      await setField(sheets, st.rowNum, head, "devices_count", sanitizeCell(String(n)));
-      await ask("repair_deadline");
-      res.status(200).send("ok"); return;
+      if (!(n>0)){ await tgSend(chatId, "Введите положительное число."); res.status(200).send("ok"); return; }
+      await setField(sheets, st.rowNum, head, "devices_count", String(Math.min(n, LIMITS.devicesMax)));
+      await ask("repair_deadline"); res.status(200).send("ok"); return;
     }
-    if (step === "ask_delivery_deadline") {
-      await setField(sheets, st.rowNum, head, "delivery_deadline", sanitizeCell((text||"").trim()));
+    if (step === "ask_delivery_deadline"){
+      await setField(sheets, st.rowNum, head, "delivery_deadline", sanitizeCell(clip(text, LIMITS.delivery_deadline)));
       await setField(sheets, st.rowNum, head, "step", "confirm");
       const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
       await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
       res.status(200).send("ok"); return;
     }
-    if (step === "ask_repair_deadline") {
-      await setField(sheets, st.rowNum, head, "repair_deadline", sanitizeCell((text||"").trim()));
-      await ask("self_delivery");
-      res.status(200).send("ok"); return;
+    if (step === "ask_repair_deadline"){
+      await setField(sheets, st.rowNum, head, "repair_deadline", sanitizeCell(clip(text, LIMITS.repair_deadline)));
+      await ask("self_delivery"); res.status(200).send("ok"); return;
     }
-    if (step === "ask_self_delivery") {
+    if (step === "ask_self_delivery"){
       const v = (text||"").toLowerCase();
       const val = v.includes("да") ? "Да" : v.includes("нет") ? "Нет" : null;
-      if (!val) { await tgSend(chatId, "Выберите «Да» или «Нет».", YESNO_KBD); res.status(200).send("ok"); return; }
+      if (!val){ await tgSend(chatId, "Выберите «Да» или «Нет».", YESNO_KBD); res.status(200).send("ok"); return; }
       await setField(sheets, st.rowNum, head, "self_delivery", sanitizeCell(val));
       await setField(sheets, st.rowNum, head, "step", "confirm");
       const fresh = (await readAll(sheets, `DialogState!A${st.rowNum}:Z${st.rowNum}`))[0];
       await tgSend(chatId, makeSummary(fresh, idx), YESNO_INLINE);
       res.status(200).send("ok"); return;
     }
-
-    if (step === "confirm") {
+    if (step === "confirm"){
       await tgSend(chatId, "Нажмите «✅ Подтвердить» или «✏️ Исправить…» ниже.");
       res.status(200).send("ok"); return;
     }
 
-    // дефолт
     await tgSend(chatId, "Давайте начнём заново: /start");
     res.status(200).send("ok"); return;
 
-  } catch (e) {
+  } catch(e){
+    try{
+      const sheets = await getSheets(); // может не взлететь, но попробуем
+      await logEvent(sheets, "error", "", "unhandled_error", { msg: String(e?.message || e) });
+    } catch(_){}
     console.error(e);
-    // всегда 200, чтобы Telegram не ретраил
     res.status(200).send("ok");
   }
 }
