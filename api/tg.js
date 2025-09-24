@@ -284,12 +284,12 @@ export default async function handler(req, res) {
 
   try {
     // 2) Верификация источника Telegram по секрету
-    if (!verifyTelegramSecret(req, TG_SECRET_TOKEN)) {
-      // Временная диагностика — можно оставить на время отладки:
-      // console.warn("Bad or missing X-Telegram-Bot-Api-Secret-Token");
-      res.status(200).send("ok");
-      return;
-    }
+   if (!verifyTelegramSecret(req, TG_SECRET_TOKEN)) {
+  console.log("TG secret header:", req.headers["x-telegram-bot-api-secret-token"] ? "present" : "absent");
+  res.status(200).send("ok");
+  return;
+}
+
 
     // 3) Дедуп по update_id
     const prelimUpdate = req.body || {};
